@@ -5,11 +5,18 @@ const util = require('util')
 const awsIot = require('aws-iot-device-sdk')
 const bindAll = require('bindall')
 const Promise = require('any-promise')
-const co = Promise.coroutine || require('co').wrap
-const pify = require('pify')
+const {
+  co,
+  promisify,
+  post,
+  genClientId,
+  genNonce,
+  stringify,
+  prettify,
+  isPromise
+} = require('./utils')
 // const Restore = require('@tradle/restore')
 const debug = require('./debug')
-const stringify = JSON.stringify.bind(JSON)
 const paths = {
   preauth: 'preauth',
   auth: 'auth',
@@ -22,13 +29,9 @@ module.exports = Client
 function Client ({ endpoint, node, position, clientId, encoding=DEFAULT_ENCODING }) {
   EventEmitter.call(this)
   this._endpoint = endpoint.replace(/\/+$/, '')
-  this._authenticated = false
-  this._subscribed = false
   this._client = null
   this._clientId = clientId
   this._encoding = encoding
-  this._node = node
-  this._position = position
   this._serverAheadMillis = 0
   this._sending = null
   this._promiseReady = new Promise(resolve => this.once('ready', resolve))
@@ -36,7 +39,9 @@ function Client ({ endpoint, node, position, clientId, encoding=DEFAULT_ENCODING
   this._promiseSubscribed = new Promise(resolve => this.once('subscribe', resolve))
 
   bindAll(this)
-  this._maybeStart()
+
+  this.setNode(node)
+  this.setPosition(position)
 }
 
 util.inherits(Client, EventEmitter)
@@ -50,13 +55,14 @@ Client.prototype._debug = function (...args) {
 }
 
 Client.prototype._maybeStart = function () {
-  if (this._node && this._position) {
-    this.auth().catch(err => {
-      this._debug('auth failed', err.stack)
-      this.emit('error', err)
-      throw err
-    })
-  }
+  if (!(this._node && this._position)) return
+
+  this._auth().catch(err => {
+    this._authenticating = false
+    this._debug('auth failed', err.stack)
+    this.emit('error', err)
+    throw err
+  })
 }
 
 Client.prototype.now = function () {
@@ -74,11 +80,15 @@ Client.prototype._adjustServerTime = function ({ localStart, localEnd, serverSta
 }
 
 Client.prototype.setNode = function (node) {
+  if (this._node) throw new Error('node already set')
+
   this._node = node
   this._maybeStart()
 }
 
 Client.prototype.setPosition = function (position) {
+  if (this._position) throw new Error('position already set')
+
   this._position = position
   this._maybeStart()
 }
@@ -121,7 +131,7 @@ Client.prototype.ready = function () {
   return this._promiseReady
 }
 
-Client.prototype.auth = co(function* () {
+Client.prototype._auth = co(function* () {
   const node = this._node
   const { permalink, identity } = node
   const clientId = this._clientId || (this._clientId = genClientId(permalink))
@@ -173,7 +183,7 @@ Client.prototype.auth = co(function* () {
   try {
     authResp = yield post(`${this._endpoint}/${paths.auth}`, signed.object)
   } catch (err) {
-    if (/timed\s+out/i.test(err.message)) return this.auth()
+    if (/timed\s+out/i.test(err.message)) return this._auth()
 
     this.emit('error', err)
     throw err
@@ -203,8 +213,11 @@ Client.prototype.auth = co(function* () {
     encoding: this._encoding
   })
 
-  this._publish = pify(client.publish.bind(client))
-  this._subscribe = pify(client.subscribe.bind(client))
+  // override to do a manual PUBACK
+  client.handleMessage = this.handleMessage
+
+  this._publish = promisify(client.publish.bind(client))
+  this._subscribe = promisify(client.subscribe.bind(client))
 
   client.on('connect', this._onconnect)
   client.once('connect', co(function* () {
@@ -220,7 +233,7 @@ Client.prototype.auth = co(function* () {
     this.emit('subscribe')
   }).bind(this))
 
-  client.on('message', this._onmessage)
+  // client.on('message', this._onmessage)
   client.on('error', this._onerror)
   client.on('reconnect', this._onreconnect)
   client.on('offline', this._onoffline)
@@ -243,7 +256,24 @@ Client.prototype._onconnect = function () {
   this.emit('connect')
 }
 
-Client.prototype._onmessage = function (topic, payload) {
+Client.prototype.onmessage = function () {
+  throw new Error('override this method')
+}
+
+Client.prototype.handleMessage = co(function* (packet, cb) {
+  const topic = packet.topic.toString()
+  const message = packet.payload
+  try {
+    yield this._handleMessage(topic, payload)
+  } catch (err) {
+    this._debug('message handler failed', err)
+    throw err
+  } finally {
+    cb()
+  }
+})
+
+Client.prototype._handleMessage = co(function* (topic, payload) {
   this._debug(`received "${topic}" event`)
   try {
     payload = JSON.parse(payload)
@@ -254,13 +284,13 @@ Client.prototype._onmessage = function (topic, payload) {
 
   switch (topic) {
   case `${this._clientId}/message`:
-    this._receiveMessages(payload)
+    yield this._receiveMessages(payload)
     break
   case `${this._clientId}/ack`:
-    this._receiveAck(payload)
+    yield this._receiveAck(payload)
     break
   case `${this._clientId}/reject`:
-    this._receiveReject(payload)
+    yield this._receiveReject(payload)
     break
   default:
     this._debug(`don't know how to handle "${topic}" events`)
@@ -269,9 +299,10 @@ Client.prototype._onmessage = function (topic, payload) {
   //   this._catchUpServer(payload)
   //   break
   }
-}
+})
 
-Client.prototype._receiveAck = function ({ message }) {
+Client.prototype._receiveAck = function (payload) {
+  const { message } = payload
   this._debug(`received ack for message: ${message.link}`)
   this.emit('ack', message)
   // for fine-grained subscription
@@ -301,18 +332,21 @@ Client.prototype._receiveReject = function (payload) {
   this.emit(`reject:${message.link}`, err)
 }
 
-Client.prototype._receiveMessages = function ({ messages }) {
+Client.prototype._receiveMessages = co(function* ({ messages }) {
   for (let message of messages) {
     const { recipientPubKey } = message
     const { pub } = recipientPubKey
     if (!Buffer.isBuffer(pub)) {
       recipientPubKey.pub = new Buffer(pub.data)
     }
+
+    const maybePromise = this.onmessage(message)
+    if (isPromise(maybePromise)) yield maybePromise
   }
 
-  this.emit('messages', messages)
-  messages.forEach(message => this.emit('message', message))
-}
+  // this.emit('messages', messages)
+  // messages.forEach(message => this.emit('message', message))
+})
 
 // Client.prototype._catchUpServer = co(function* (req) {
 //   let messages
@@ -390,35 +424,3 @@ Client.prototype.send = co(function* ({ message, link }) {
 
   // this.emit('sent', message)
 })
-
-const post = co(function* (url, data) {
-  const res = yield fetch(url, {
-    method: 'POST',
-    headers: {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json'
-    },
-    body: stringify(data)
-  })
-
-  const text = yield res.text()
-  if (res.status > 300) {
-    throw new Error(text)
-  }
-
-  if (text.length) return JSON.parse(text)
-
-  return text
-})
-
-function genClientId (permalink) {
-  return permalink + crypto.randomBytes(20).toString('hex')
-}
-
-function genNonce () {
-  return crypto.randomBytes(32).toString('hex')
-}
-
-function prettify (obj) {
-  return stringify(obj, null, 2)
-}
