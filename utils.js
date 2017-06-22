@@ -1,3 +1,5 @@
+const fetch = require('isomorphic-fetch')
+const crypto = require('crypto')
 const stringify = JSON.stringify.bind(JSON)
 const co = Promise.coroutine || require('co').wrap
 const promisify = require('pify')

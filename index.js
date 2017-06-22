@@ -23,6 +23,7 @@ const paths = {
 }
 
 const DEFAULT_ENCODING = 'utf8'
+const SUB_TOPICS = ['message', 'ack', 'reject']
 
 module.exports = Client
 
@@ -69,7 +70,7 @@ Client.prototype.now = function () {
   return Date.now() + this._serverAheadMillis
 }
 
-Client.prototype._adjustServerTime = function ({ localStart, localEnd, serverStart }) {
+Client.prototype._adjustServerTime = function ({ localStart, localEnd=Date.now(), serverStart }) {
   const requestTime = localEnd - localStart
   // adjust for delay due to API Gateway
   const adjustedServerStart = serverStart - Math.min(requestTime / 4, 500)
@@ -89,6 +90,7 @@ Client.prototype.setNode = function (node) {
 Client.prototype.setPosition = function (position) {
   if (this._position) throw new Error('position already set')
 
+  this._debug('client position:', prettify(position))
   this._position = position
   this._maybeStart()
 }
@@ -106,7 +108,7 @@ Client.prototype._setCatchUpTarget = function ({ sent, received }) {
   }
 
   const checkIfCaughtUp = messages => {
-    const caughtUp = messages.some(message => {
+    const caughtUp = !sent || messages.some(message => {
       return message.link === sent.link || message.time >= sent.time
     })
 
@@ -116,15 +118,13 @@ Client.prototype._setCatchUpTarget = function ({ sent, received }) {
     }
 
     onCaughtUp()
+    return true
   }
 
-  if (!sent) {
-    onCaughtUp()
-    return
+  if (!checkIfCaughtUp([this._position.received])) {
+    this._debug(`waiting for message: ${prettify(sent)}`)
+    this.on('messages', checkIfCaughtUp)
   }
-
-  this._debug(`waiting for message: ${sent}`)
-  this.on('messages', checkIfCaughtUp)
 }
 
 Client.prototype.ready = function () {
@@ -153,7 +153,6 @@ Client.prototype._auth = co(function* () {
 
   this._adjustServerTime({
     localStart: requestStart,
-    localEnd: Date.now(),
     serverStart: time
   })
 
@@ -193,7 +192,6 @@ Client.prototype._auth = co(function* () {
 
   this._adjustServerTime({
     localStart: requestStart,
-    localEnd: Date.now(),
     serverStart: authResp.time
   })
 
@@ -221,8 +219,12 @@ Client.prototype._auth = co(function* () {
 
   client.on('connect', this._onconnect)
   client.once('connect', co(function* () {
+    const topics = `${this._clientId}/#`
+    // const topics = SUB_TOPICS.map(topic => `${this._clientId}/${topic}`)
+    // const topics = SUB_TOPICS.map(topic => `${this._clientId}/${topic}`)
+    this._debug(`subscribing to topic: ${topics}`)
     try {
-      yield this._subscribe(`${this._clientId}/+`, { qos: 1 })
+      yield this._subscribe(topics, { qos: 1 })
     } catch (err) {
       this.emit('error', err)
       this._debug('failed to subscribe')
@@ -261,10 +263,9 @@ Client.prototype.onmessage = function () {
 }
 
 Client.prototype.handleMessage = co(function* (packet, cb) {
-  const topic = packet.topic.toString()
-  const message = packet.payload
+  const { topic, payload } = packet
   try {
-    yield this._handleMessage(topic, payload)
+    yield this._handleMessage(topic.toString(), payload)
   } catch (err) {
     this._debug('message handler failed', err)
     throw err
@@ -287,10 +288,10 @@ Client.prototype._handleMessage = co(function* (topic, payload) {
     yield this._receiveMessages(payload)
     break
   case `${this._clientId}/ack`:
-    yield this._receiveAck(payload)
+    this._receiveAck(payload)
     break
   case `${this._clientId}/reject`:
-    yield this._receiveReject(payload)
+    this._receiveReject(payload)
     break
   default:
     this._debug(`don't know how to handle "${topic}" events`)
@@ -408,7 +409,11 @@ Client.prototype.send = co(function* ({ message, link }) {
     yield this.publish({
       // topic: `${this._clientId}/message`,
       topic: 'message',
-      payload: message
+      payload: {
+        // until AWS resolves this issue:
+        // https://forums.aws.amazon.com/thread.jspa?messageID=789721
+        data: message.toString('base64')
+      }
     })
 
     this._debug(`waiting for ack:${link}`)
