@@ -108,7 +108,7 @@ Client.prototype._setCatchUpTarget = function ({ sent, received }) {
   }
 
   const checkIfCaughtUp = messages => {
-    const caughtUp = !sent || messages.some(message => {
+    const caughtUp = messages.some(message => {
       return message.link === sent.link || message.time >= sent.time
     })
 
@@ -121,7 +121,12 @@ Client.prototype._setCatchUpTarget = function ({ sent, received }) {
     return true
   }
 
-  if (!checkIfCaughtUp([this._position.received])) {
+  if (!sent) {
+    return onCaughtUp()
+  }
+
+  const pos = this._position.received
+  if (!(pos && checkIfCaughtUp([pos]))) {
     this._debug(`waiting for message: ${prettify(sent)}`)
     this.on('messages', checkIfCaughtUp)
   }
@@ -404,6 +409,12 @@ Client.prototype.send = co(function* ({ message, link }) {
 
   this._sending = link
   yield this._promiseSubscribed
+  let unsub = []
+  const promiseAck = new Promise((resolve, reject) => {
+    this._debug(`waiting for ack:${link}`)
+    unsub.push(listen(this, `ack:${link}`, resolve, true))
+    unsub.push(listen(this, `reject:${link}`, reject, true))
+  })
 
   try {
     yield this.publish({
@@ -416,16 +427,19 @@ Client.prototype.send = co(function* ({ message, link }) {
       }
     })
 
-    this._debug(`waiting for ack:${link}`)
-    yield new Promise((resolve, reject) => {
-      this.once(`ack:${link}`, resolve)
-      this.once(`reject:${link}`, reject)
-    })
-
+    yield promiseAck
     this._debug('delivered message!')
   } finally {
     this._sending = null
+    unsub.forEach(fn => fn())
   }
 
   // this.emit('sent', message)
 })
+
+function listen (emitter, event, handler, once) {
+  emitter[once ? 'once' : 'on'](event, handler)
+  return function unsubscribe () {
+    emitter.removeListener(event, handler)
+  }
+}
