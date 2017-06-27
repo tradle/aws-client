@@ -9,6 +9,7 @@ const {
   co,
   promisify,
   post,
+  put,
   genClientId,
   genNonce,
   stringify,
@@ -20,10 +21,14 @@ const debug = require('./debug')
 const paths = {
   preauth: 'preauth',
   auth: 'auth',
+  message: 'message'
 }
 
 const DEFAULT_ENCODING = 'utf8'
 const SUB_TOPICS = ['message', 'ack', 'reject']
+// 128 KB but let's leave some wiggle room
+// MQTT messages wiggle like it's 1995
+const MQTT_MAX_MESSAGE_SIZE = 126 * 1000
 
 module.exports = Client
 
@@ -408,6 +413,25 @@ Client.prototype.send = co(function* ({ message, link }) {
   }
 
   this._sending = link
+  try {
+    // 33% overhead from converting to base64
+    if (message.length * 1.34 > MQTT_MAX_MESSAGE_SIZE) {
+      yield this._sendHTTP({ message, link })
+    } else {
+      yield this._sendMQTT({ message, link })
+    }
+  } finally {
+    this._sending = null
+  }
+})
+
+Client.prototype._sendHTTP = co(function* ({ message, link }) {
+  this._debug('sending over HTTP')
+  yield put(`${this._endpoint}/${paths.message}`, message)
+})
+
+Client.prototype._sendMQTT = co(function* ({ message, link }) {
+  this._debug('sending over MQTT')
   yield this._promiseSubscribed
   let unsub = []
   const promiseAck = new Promise((resolve, reject) => {

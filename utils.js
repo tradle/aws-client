@@ -14,6 +14,24 @@ const post = co(function* (url, data) {
     body: stringify(data)
   })
 
+  return processResponse(res)
+})
+
+const put = co(function* (url, data) {
+  const res = yield fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json'
+      // 'Content-Type': 'application/octet-stream'
+    },
+    body: JSON.stringify(data.toString('base64'))
+  })
+
+  return processResponse(res)
+})
+
+const processResponse = co(function* (res) {
   const text = yield res.text()
   if (res.status > 300) {
     throw new Error(text)
@@ -44,6 +62,7 @@ module.exports = {
   co,
   promisify,
   post,
+  put,
   genClientId,
   genNonce,
   prettify,
