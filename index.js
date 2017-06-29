@@ -25,6 +25,9 @@ const paths = {
 }
 
 const DEFAULT_ENCODING = 'utf8'
+const TOPIC_PREFIX = 'tradle-'
+const prefixTopic = topic => `${TOPIC_PREFIX}${topic}`
+const unprefixTopic = topic => topic.slice(TOPIC_PREFIX.length)
 const SUB_TOPICS = ['message', 'ack', 'reject']
 // 128 KB but let's leave some wiggle room
 // MQTT messages wiggle like it's 1995
@@ -229,9 +232,8 @@ Client.prototype._auth = co(function* () {
 
   client.on('connect', this._onconnect)
   client.once('connect', co(function* () {
-    const topics = `${this._clientId}/#`
-    // const topics = SUB_TOPICS.map(topic => `${this._clientId}/${topic}`)
-    // const topics = SUB_TOPICS.map(topic => `${this._clientId}/${topic}`)
+    const topics = SUB_TOPICS.map(topic => prefixTopic(`${this._clientId}/${topic}`))
+    // const topics = prefixTopic(`${this._clientId}/*`)
     this._debug(`subscribing to topic: ${topics}`)
     try {
       yield this._subscribe(topics, { qos: 1 })
@@ -255,7 +257,7 @@ Client.prototype._auth = co(function* () {
 Client.prototype.publish = co(function* ({ topic, payload, qos=1 }) {
   yield this._promiseAuthenticated
   this._debug(`publishing to topic: "${topic}"`)
-  return this._publish(topic, stringify(payload), { qos })
+  return this._publish(prefixTopic(topic), stringify(payload), { qos })
 })
 
 Client.prototype._onerror = function (err) {
@@ -275,7 +277,7 @@ Client.prototype.onmessage = function () {
 Client.prototype.handleMessage = co(function* (packet, cb) {
   const { topic, payload } = packet
   try {
-    yield this._handleMessage(topic.toString(), payload)
+    yield this._handleMessage(unprefixTopic(topic.toString()), payload)
   } catch (err) {
     this._debug('message handler failed', err)
     throw err
@@ -398,7 +400,7 @@ Client.prototype._onclose = function () {
 Client.prototype.request = co(function* (restore) {
   const { seqs, gt, lt } = restore
   return this.publish({
-    topic: `${this._clientId}/restore`,
+    topic: 'restore',
     payload: restore
   })
 })
