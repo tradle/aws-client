@@ -5,6 +5,7 @@ const util = require('util')
 const awsIot = require('aws-iot-device-sdk')
 const bindAll = require('bindall')
 const Promise = require('any-promise')
+const elistener = require('elistener')
 const {
   co,
   promisify,
@@ -41,19 +42,15 @@ function Client ({ endpoint, node, position, clientId, encoding=DEFAULT_ENCODING
   this._client = null
   this._clientId = clientId
   this._encoding = encoding
-  this._serverAheadMillis = 0
-  this._sending = null
-  this._promiseReady = new Promise(resolve => this.once('ready', resolve))
-  this._promiseAuthenticated = new Promise(resolve => this.once('authenticate', resolve))
-  this._promiseSubscribed = new Promise(resolve => this.once('subscribe', resolve))
-
   bindAll(this)
 
-  this.setNode(node)
-  this.setPosition(position)
+  this._node = node
+  this._position = position
+  this.reset()
 }
 
 util.inherits(Client, EventEmitter)
+elistener.install(Client.prototype)
 
 Client.prototype._debug = function (...args) {
   if (this._node) {
@@ -88,20 +85,20 @@ Client.prototype._adjustServerTime = function ({ localStart, localEnd=Date.now()
   this._debug(`server clock ahead by ${this._serverAheadMillis}`)
 }
 
-Client.prototype.setNode = function (node) {
-  if (this._node) throw new Error('node already set')
+// Client.prototype.setNode = function (node) {
+//   if (this._node) throw new Error('node already set')
 
-  this._node = node
-  this._maybeStart()
-}
+//   this._node = node
+//   this._maybeStart()
+// }
 
-Client.prototype.setPosition = function (position) {
-  if (this._position) throw new Error('position already set')
+// Client.prototype.setPosition = function (position) {
+//   if (this._position) throw new Error('position already set')
 
-  this._debug('client position:', prettify(position))
-  this._position = position
-  this._maybeStart()
-}
+//   this._debug('client position:', prettify(position))
+//   this._position = position
+//   this._maybeStart()
+// }
 
 /**
  * @param {Object} options.sent     { link, time } of last message queued by server
@@ -136,7 +133,7 @@ Client.prototype._setCatchUpTarget = function ({ sent, received }) {
   const pos = this._position.received
   if (!(pos && checkIfCaughtUp([pos]))) {
     this._debug(`waiting for message: ${prettify(sent)}`)
-    this.on('messages', checkIfCaughtUp)
+    this.listenTo(this, 'messages', checkIfCaughtUp)
   }
 }
 
@@ -230,8 +227,8 @@ Client.prototype._auth = co(function* () {
   this._publish = promisify(client.publish.bind(client))
   this._subscribe = promisify(client.subscribe.bind(client))
 
-  client.on('connect', this._onconnect)
-  client.once('connect', co(function* () {
+  this.listenTo(client, 'connect', this._onconnect)
+  this.listenOnce(client, 'connect', co(function* () {
     const topics = SUB_TOPICS.map(topic => prefixTopic(`${this._clientId}/${topic}`))
     // const topics = prefixTopic(`${this._clientId}/*`)
     this._debug(`subscribing to topic: ${topics}`)
@@ -247,11 +244,34 @@ Client.prototype._auth = co(function* () {
     this.emit('subscribe')
   }).bind(this))
 
-  // client.on('message', this._onmessage)
-  client.on('error', this._onerror)
-  client.on('reconnect', this._onreconnect)
-  client.on('offline', this._onoffline)
-  client.on('close', this._onclose)
+  // this.listenTo(client, 'message', this._onmessage)
+  this.listenTo(client, 'error', this._onerror)
+  this.listenTo(client, 'reconnect', this._onreconnect)
+  this.listenTo(client, 'offline', this._onoffline)
+  this.listenTo(client, 'close', this._onclose)
+  this.listenOnce(this, 'error', this.reset)
+})
+
+Client.prototype._promiseListen = function (event) {
+  return new Promise(resolve => this.listenOnce(this, event, resolve))
+}
+
+Client.prototype.reset = co(function* () {
+  this._ready = false
+  this._serverAheadMillis = 0
+  this._sending = null
+  this.stopListening(this)
+  this._promiseReady = this._promiseListen('ready')
+  this._promiseAuthenticated = this._promiseListen('authenticate')
+  this._promiseSubscribed = this._promiseListen('subscribe')
+  const { client } = this
+  if (client) {
+    this.stopListening(client)
+    this._client = null
+    yield promisify(client).close(true)
+  }
+
+  this._maybeStart()
 })
 
 Client.prototype.publish = co(function* ({ topic, payload, qos=1 }) {
@@ -280,7 +300,6 @@ Client.prototype.handleMessage = co(function* (packet, cb) {
     yield this._handleMessage(unprefixTopic(topic.toString()), payload)
   } catch (err) {
     this._debug('message handler failed', err)
-    throw err
   } finally {
     cb()
   }

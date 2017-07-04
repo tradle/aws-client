@@ -21,6 +21,7 @@
     "bindall": "^2.0.1",
     "co": "^4.6.0",
     "debug": "^2.6.6",
+    "elistener": "^1.1.0",
     "isomorphic-fetch": "^2.2.1",
     "pify": "^3.0.0"
   }

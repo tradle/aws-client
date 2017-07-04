@@ -237,6 +237,10 @@ duplexify@^3.2.0:
     readable-stream "^2.0.0"
     stream-shift "^1.0.0"
 
+elistener@^1.1.0:
+  version "1.1.0"
+  resolved "https://registry.yarnpkg.com/elistener/-/elistener-1.1.0.tgz#0f9fcc67276919a1ff7a8962cda3763ca0571ca3"
+
 encoding@^0.1.11:
   version "0.1.12"
   resolved "https://registry.yarnpkg.com/encoding/-/encoding-0.1.12.tgz#538b66f3ee62cd1ab51ec323829d1f9480c74beb"
