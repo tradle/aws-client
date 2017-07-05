@@ -1,3 +1,4 @@
+const extend = require('xtend/mutable')
 const fetch = require('isomorphic-fetch')
 const crypto = require('crypto')
 const stringify = JSON.stringify.bind(JSON)
@@ -58,7 +59,30 @@ function isPromise (obj) {
   return obj && typeof obj.then === 'function'
 }
 
+function getTip ({ node, counterparty, sent }) {
+  const from = sent ? node.permalink : counterparty
+  const to = sent ? counterparty : node.permalink
+  const seqOpts = {}
+  const base = from + '!' + to
+  seqOpts.gte = base + '!'
+  seqOpts.lte = base + '\xff'
+  seqOpts.reverse = true
+  seqOpts.limit = 1
+  // console.log(seqOpts)
+  const source = node.objects.bySeq(seqOpts)
+  return new Promise((resolve, reject) => {
+    source.on('error', reject)
+    source.on('data', data => resolve({
+      time: data.timestamp,
+      link: data.link
+    }))
+
+    source.on('end', () => resolve(null))
+  })
+}
+
 module.exports = {
+  extend,
   co,
   promisify,
   post,
@@ -67,5 +91,6 @@ module.exports = {
   genNonce,
   prettify,
   isPromise,
-  stringify
+  stringify,
+  getTip
 }

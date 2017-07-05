@@ -7,6 +7,7 @@ const bindAll = require('bindall')
 const Promise = require('any-promise')
 const elistener = require('elistener')
 const {
+  extend,
   co,
   promisify,
   post,
@@ -15,7 +16,8 @@ const {
   genNonce,
   stringify,
   prettify,
-  isPromise
+  isPromise,
+  getTip
 } = require('./utils')
 // const Restore = require('@tradle/restore')
 const debug = require('./debug')
@@ -36,21 +38,42 @@ const MQTT_MAX_MESSAGE_SIZE = 126 * 1000
 
 module.exports = Client
 
-function Client ({ endpoint, node, position, clientId, encoding=DEFAULT_ENCODING }) {
+function Client ({
+  node,
+  counterparty,
+  endpoint,
+  position,
+  clientId,
+  encoding=DEFAULT_ENCODING
+}) {
   EventEmitter.call(this)
+  bindAll(this)
+
   this._endpoint = endpoint.replace(/\/+$/, '')
   this._client = null
   this._clientId = clientId
   this._encoding = encoding
-  bindAll(this)
-
+  this._counterparty = counterparty
   this._node = node
-  this._position = position
-  this.reset()
+  this.reset({ position })
 }
 
 util.inherits(Client, EventEmitter)
 elistener.install(Client.prototype)
+
+Client.prototype._findPosition = co(function* () {
+  const common = {
+    node: this._node,
+    counterparty: this._counterparty
+  }
+
+  const position = yield {
+    sent: getTip(extend({ sent: true }, common)),
+    received: getTip(common)
+  }
+
+  this._setPosition(position)
+})
 
 Client.prototype._debug = function (...args) {
   if (this._node) {
@@ -67,7 +90,6 @@ Client.prototype._maybeStart = function () {
     this._authenticating = false
     this._debug('auth failed', err.stack)
     this.emit('error', err)
-    throw err
   })
 }
 
@@ -92,13 +114,13 @@ Client.prototype._adjustServerTime = function ({ localStart, localEnd=Date.now()
 //   this._maybeStart()
 // }
 
-// Client.prototype.setPosition = function (position) {
-//   if (this._position) throw new Error('position already set')
+Client.prototype._setPosition = function (position) {
+  if (this._position) throw new Error('position already set')
 
-//   this._debug('client position:', prettify(position))
-//   this._position = position
-//   this._maybeStart()
-// }
+  this._debug('client position:', prettify(position))
+  this._position = position
+  this._maybeStart()
+}
 
 /**
  * @param {Object} options.sent     { link, time } of last message queued by server
@@ -249,29 +271,35 @@ Client.prototype._auth = co(function* () {
   this.listenTo(client, 'reconnect', this._onreconnect)
   this.listenTo(client, 'offline', this._onoffline)
   this.listenTo(client, 'close', this._onclose)
-  this.listenOnce(this, 'error', this.reset)
+  this.listenOnce(this, 'error', err => this.reset())
 })
 
 Client.prototype._promiseListen = function (event) {
   return new Promise(resolve => this.listenOnce(this, event, resolve))
 }
 
-Client.prototype.reset = co(function* () {
+Client.prototype.reset = co(function* (opts={}) {
+  const { position } = opts
   this._ready = false
   this._serverAheadMillis = 0
   this._sending = null
+  this._position = null
   this.stopListening(this)
   this._promiseReady = this._promiseListen('ready')
   this._promiseAuthenticated = this._promiseListen('authenticate')
   this._promiseSubscribed = this._promiseListen('subscribe')
-  const { client } = this
+  const client = this._client
   if (client) {
     this.stopListening(client)
     this._client = null
     yield promisify(client).close(true)
   }
 
-  this._maybeStart()
+  if (position) {
+    this._setPosition(position)
+  } else {
+    this._findPosition()
+  }
 })
 
 Client.prototype.publish = co(function* ({ topic, payload, qos=1 }) {

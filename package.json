@@ -23,6 +23,7 @@
     "debug": "^2.6.6",
     "elistener": "^1.1.0",
     "isomorphic-fetch": "^2.2.1",
-    "pify": "^3.0.0"
+    "pify": "^3.0.0",
+    "xtend": "^4.0.1"
   }
 }
