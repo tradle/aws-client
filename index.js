@@ -27,6 +27,8 @@ const paths = {
   message: 'message'
 }
 
+const CLOSE_TIMEOUT_ERROR = new Error('close timed out')
+const CLOSE_TIMEOUT = 1000
 const DEFAULT_ENCODING = 'utf8'
 const TOPIC_PREFIX = 'tradle-'
 const prefixTopic = topic => `${TOPIC_PREFIX}${topic}`
@@ -248,6 +250,7 @@ Client.prototype._auth = co(function* () {
 
   this._publish = promisify(client.publish.bind(client))
   this._subscribe = promisify(client.subscribe.bind(client))
+  this._close = promisify(client.end.bind(client))
 
   this.listenTo(client, 'connect', this._onconnect)
   this.listenOnce(client, 'connect', co(function* () {
@@ -267,11 +270,13 @@ Client.prototype._auth = co(function* () {
   }).bind(this))
 
   // this.listenTo(client, 'message', this._onmessage)
-  this.listenTo(client, 'error', this._onerror)
   this.listenTo(client, 'reconnect', this._onreconnect)
   this.listenTo(client, 'offline', this._onoffline)
   this.listenTo(client, 'close', this._onclose)
-  this.listenOnce(this, 'error', err => this.reset())
+  this.listenOnce(client, 'error', err => {
+    this._debug('error', err)
+    this.reset()
+  })
 })
 
 Client.prototype._promiseListen = function (event) {
@@ -307,11 +312,6 @@ Client.prototype.publish = co(function* ({ topic, payload, qos=1 }) {
   this._debug(`publishing to topic: "${topic}"`)
   return this._publish(prefixTopic(topic), stringify(payload), { qos })
 })
-
-Client.prototype._onerror = function (err) {
-  this._debug('error', err)
-  this.emit('error', err)
-}
 
 Client.prototype._onconnect = function () {
   this._debug('connected')
@@ -444,6 +444,29 @@ Client.prototype._onclose = function () {
   this._debug('disconnected')
 }
 
+Client.prototype.close = co(function* () {
+  if (!this._client) return
+
+  try {
+    yield Promise.race([
+      this._close(),
+      timeoutIn(CLOSE_TIMEOUT)
+    ])
+  } catch (err) {
+    if (err === CLOSE_TIMEOUT_ERROR) {
+      this._debug(`nice close timed out after ${CLOSE_TIMEOUT}ms, forcing`)
+    } else {
+      this._debug('unexpected error on close', err)
+    }
+
+    try {
+      yield this._close(true)
+    } catch (err2) {
+      this._debug('failed to force close, giving up', err2)
+    }
+  }
+})
+
 Client.prototype.request = co(function* (restore) {
   const { seqs, gt, lt } = restore
   return this.publish({
@@ -515,4 +538,12 @@ function listen (emitter, event, handler, once) {
   return function unsubscribe () {
     emitter.removeListener(event, handler)
   }
+}
+
+function timeoutIn (millis) {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      reject(CLOSE_TIMEOUT_ERROR)
+    }, millis)
+  })
 }
