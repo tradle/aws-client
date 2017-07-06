@@ -5,20 +5,20 @@ const util = require('util')
 const awsIot = require('aws-iot-device-sdk')
 const bindAll = require('bindall')
 const Promise = require('any-promise')
-const elistener = require('elistener')
+const Ultron = require('ultron')
+const utils = require('./utils')
 const {
   extend,
   co,
   promisify,
-  post,
   put,
   genClientId,
   genNonce,
   stringify,
   prettify,
   isPromise,
-  getTip
-} = require('./utils')
+} = utils
+
 // const Restore = require('@tradle/restore')
 const debug = require('./debug')
 const paths = {
@@ -46,7 +46,8 @@ function Client ({
   endpoint,
   position,
   clientId,
-  encoding=DEFAULT_ENCODING
+  encoding=DEFAULT_ENCODING,
+  httpOnly=false
 }) {
   EventEmitter.call(this)
   bindAll(this)
@@ -57,11 +58,11 @@ function Client ({
   this._encoding = encoding
   this._counterparty = counterparty
   this._node = node
+  this._httpOnly = httpOnly
   this.reset({ position })
 }
 
 util.inherits(Client, EventEmitter)
-elistener.install(Client.prototype)
 
 Client.prototype._findPosition = co(function* () {
   const common = {
@@ -70,8 +71,8 @@ Client.prototype._findPosition = co(function* () {
   }
 
   const position = yield {
-    sent: getTip(extend({ sent: true }, common)),
-    received: getTip(common)
+    sent: utils.getTip(extend({ sent: true }, common)),
+    received: utils.getTip(common)
   }
 
   this._setPosition(position)
@@ -138,7 +139,7 @@ Client.prototype._setCatchUpTarget = function ({ sent, received }) {
 
   const checkIfCaughtUp = messages => {
     const caughtUp = messages.some(message => {
-      return message.link === sent.link || message.time >= sent.time
+      return /*message.link === sent.link ||*/ message.time >= sent.time
     })
 
     if (!caughtUp) {
@@ -157,7 +158,7 @@ Client.prototype._setCatchUpTarget = function ({ sent, received }) {
   const pos = this._position.received
   if (!(pos && checkIfCaughtUp([pos]))) {
     this._debug(`waiting for message: ${prettify(sent)}`)
-    this.listenTo(this, 'messages', checkIfCaughtUp)
+    this._myEvents.on('messages', checkIfCaughtUp)
   }
 }
 
@@ -183,19 +184,12 @@ Client.prototype._auth = co(function* () {
     challenge,
     // timestamp of request hitting server
     time
-  } = yield post(`${this._endpoint}/${paths.preauth}`, { clientId, identity })
+  } = yield utils.post(`${this._endpoint}/${paths.preauth}`, { clientId, identity })
 
   this._adjustServerTime({
     localStart: requestStart,
     serverStart: time
   })
-
-  // const iotEndpoint = 'a21zoo1cfp44ha.iot.us-east-1.amazonaws.com'
-  // const region = 'us-east-1'
-  // const accessKey = 'abc'
-  // const secretKey = 'abc'
-  // const sessionToken = 'abc'
-  // const challenge = 'abc'
 
   const signed = yield node.sign({
     object: {
@@ -214,7 +208,7 @@ Client.prototype._auth = co(function* () {
   this._debug('sending challenge response')
   let authResp
   try {
-    authResp = yield post(`${this._endpoint}/${paths.auth}`, signed.object)
+    authResp = yield utils.post(`${this._endpoint}/${paths.auth}`, signed.object)
   } catch (err) {
     if (/timed\s+out/i.test(err.message)) return this._auth()
 
@@ -248,12 +242,9 @@ Client.prototype._auth = co(function* () {
   // override to do a manual PUBACK
   client.handleMessage = this.handleMessage
 
-  this._publish = promisify(client.publish.bind(client))
-  this._subscribe = promisify(client.subscribe.bind(client))
-  this._close = promisify(client.end.bind(client))
-
-  this.listenTo(client, 'connect', this._onconnect)
-  this.listenOnce(client, 'connect', co(function* () {
+  this._clientEvents = new Ultron(client)
+  this._clientEvents.on('connect', this._onconnect)
+  this._clientEvents.once('connect', co(function* () {
     const topics = SUB_TOPICS.map(topic => prefixTopic(`${this._clientId}/${topic}`))
     // const topics = prefixTopic(`${this._clientId}/*`)
     this._debug(`subscribing to topic: ${topics}`)
@@ -270,17 +261,21 @@ Client.prototype._auth = co(function* () {
   }).bind(this))
 
   // this.listenTo(client, 'message', this._onmessage)
-  this.listenTo(client, 'reconnect', this._onreconnect)
-  this.listenTo(client, 'offline', this._onoffline)
-  this.listenTo(client, 'close', this._onclose)
-  this.listenOnce(client, 'error', err => {
+  this._clientEvents.on('reconnect', this._onreconnect)
+  this._clientEvents.on('offline', this._onoffline)
+  this._clientEvents.on('close', this._onclose)
+  this._clientEvents.once('error', err => {
     this._debug('error', err)
     this.reset()
   })
+
+  const pclient = promisify(client)
+  this._publish = pclient.publish
+  this._subscribe = pclient.subscribe
 })
 
 Client.prototype._promiseListen = function (event) {
-  return new Promise(resolve => this.listenOnce(this, event, resolve))
+  return new Promise(resolve => this._myEvents.once(event, resolve))
 }
 
 Client.prototype.reset = co(function* (opts={}) {
@@ -289,15 +284,20 @@ Client.prototype.reset = co(function* (opts={}) {
   this._serverAheadMillis = 0
   this._sending = null
   this._position = null
-  this.stopListening(this)
+  if (this._myEvents) {
+    this._myEvents.remove()
+  }
+
+  this._myEvents = new Ultron(this)
   this._promiseReady = this._promiseListen('ready')
   this._promiseAuthenticated = this._promiseListen('authenticate')
   this._promiseSubscribed = this._promiseListen('subscribe')
   const client = this._client
   if (client) {
-    this.stopListening(client)
+    this._clientEvents.remove()
+    this._clientEvents = null
     this._client = null
-    yield promisify(client).close(true)
+    yield closeClient(true)
   }
 
   if (position) {
@@ -356,7 +356,7 @@ Client.prototype._handleMessage = co(function* (topic, payload) {
     this._debug(`don't know how to handle "${topic}" events`)
     break
   // case `${this._clientId}/restore`:
-  //   this._catchUpServer(payload)
+  //   this._bringServerUpToDate(payload)
   //   break
   }
 })
@@ -408,7 +408,7 @@ Client.prototype._receiveMessages = co(function* ({ messages }) {
   // messages.forEach(message => this.emit('message', message))
 })
 
-// Client.prototype._catchUpServer = co(function* (req) {
+// Client.prototype._bringServerUpToDate = co(function* (req) {
 //   let messages
 //   try {
 //     messages = yield Restore.conversation.respond({
@@ -444,36 +444,41 @@ Client.prototype._onclose = function () {
   this._debug('disconnected')
 }
 
-Client.prototype.close = co(function* () {
-  if (!this._client) return
+Client.prototype.close = co(function* (force) {
+  const client = this._client
+  if (!client) return
+
+  if (!force) {
+    try {
+      yield Promise.race([
+        client.close(),
+        timeoutIn(CLOSE_TIMEOUT)
+      ])
+
+      return
+    } catch (err) {
+      if (err === CLOSE_TIMEOUT_ERROR) {
+        this._debug(`nice close timed out after ${CLOSE_TIMEOUT}ms, forcing`)
+      } else {
+        this._debug('unexpected error on close', err)
+      }
+    }
+  }
 
   try {
-    yield Promise.race([
-      this._close(),
-      timeoutIn(CLOSE_TIMEOUT)
-    ])
-  } catch (err) {
-    if (err === CLOSE_TIMEOUT_ERROR) {
-      this._debug(`nice close timed out after ${CLOSE_TIMEOUT}ms, forcing`)
-    } else {
-      this._debug('unexpected error on close', err)
-    }
-
-    try {
-      yield this._close(true)
-    } catch (err2) {
-      this._debug('failed to force close, giving up', err2)
-    }
+    yield client.close(true)
+  } catch (err2) {
+    this._debug('failed to force close, giving up', err2)
   }
 })
 
-Client.prototype.request = co(function* (restore) {
-  const { seqs, gt, lt } = restore
-  return this.publish({
-    topic: 'restore',
-    payload: restore
-  })
-})
+// Client.prototype.request = co(function* (restore) {
+//   const { seqs, gt, lt } = restore
+//   return this.publish({
+//     topic: 'restore',
+//     payload: restore
+//   })
+// })
 
 Client.prototype.send = co(function* ({ message, link }) {
   if (this._sending) {
@@ -487,7 +492,7 @@ Client.prototype.send = co(function* ({ message, link }) {
   this._sending = link
   try {
     // 33% overhead from converting to base64
-    if (message.length * 1.34 > MQTT_MAX_MESSAGE_SIZE) {
+    if (this._httpOnly || message.length * 1.34 > MQTT_MAX_MESSAGE_SIZE) {
       yield this._sendHTTP({ message, link })
     } else {
       yield this._sendMQTT({ message, link })
@@ -508,8 +513,8 @@ Client.prototype._sendMQTT = co(function* ({ message, link }) {
   let unsub = []
   const promiseAck = new Promise((resolve, reject) => {
     this._debug(`waiting for ack:${link}`)
-    unsub.push(listen(this, `ack:${link}`, resolve, true))
-    unsub.push(listen(this, `reject:${link}`, reject, true))
+    unsub.push(listen(this._myEvents, `ack:${link}`, resolve, true))
+    unsub.push(listen(this._myEvents, `reject:${link}`, reject, true))
   })
 
   try {
@@ -519,7 +524,8 @@ Client.prototype._sendMQTT = co(function* ({ message, link }) {
       payload: {
         // until AWS resolves this issue:
         // https://forums.aws.amazon.com/thread.jspa?messageID=789721
-        data: message.toString('base64')
+        // data: message.toString('base64')
+        data: message
       }
     })
 
@@ -536,7 +542,7 @@ Client.prototype._sendMQTT = co(function* ({ message, link }) {
 function listen (emitter, event, handler, once) {
   emitter[once ? 'once' : 'on'](event, handler)
   return function unsubscribe () {
-    emitter.removeListener(event, handler)
+    emitter.remove(event, handler)
   }
 }
 

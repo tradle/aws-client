@@ -7,7 +7,9 @@
   "license": "MIT",
   "devDependencies": {
     "eslint": "^3.19.0",
+    "fetch-mock": "^5.12.1",
     "husky": "^0.13.3",
+    "sinon": "^2.3.6",
     "tape": "^4.6.3"
   },
   "scripts": {
@@ -21,9 +23,9 @@
     "bindall": "^2.0.1",
     "co": "^4.6.0",
     "debug": "^2.6.6",
-    "elistener": "^1.1.0",
     "isomorphic-fetch": "^2.2.1",
     "pify": "^3.0.0",
+    "ultron": "^1.1.0",
     "xtend": "^4.0.1"
   }
 }
