@@ -404,7 +404,7 @@ Client.prototype._receiveMessages = co(function* ({ messages }) {
     if (isPromise(maybePromise)) yield maybePromise
   }
 
-  // this.emit('messages', messages)
+  this.emit('messages', messages)
   // messages.forEach(message => this.emit('message', message))
 })
 
