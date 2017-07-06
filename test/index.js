@@ -100,6 +100,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
   let subscribed = false
   let published = false
   let delivered = false
+  let closed = false
 
   const stubPost = sinon.stub(utils, 'post').callsFake(function (url, data) {
     if (/preauth/.test(url)) {
@@ -143,6 +144,11 @@ test('catch up with server position before sending', loudCo(function* (t) {
     t.equal(subscribed, false)
     t.same(topics, ['message', 'ack', 'reject'].map(topic => `tradle-${clientId}/${topic}`))
     subscribed = true
+    cb()
+  }
+
+  fakeMqttClient.end = function (cb) {
+    closed = true
     cb()
   }
 
@@ -212,6 +218,9 @@ test('catch up with server position before sending', loudCo(function* (t) {
   })
 
   t.equal(delivered, true)
+  yield client.close()
+
+  t.equal(closed, true)
 
   stubDevice.restore()
   stubPost.restore()

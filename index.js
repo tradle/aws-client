@@ -227,7 +227,7 @@ Client.prototype._auth = co(function* () {
   this.emit('authenticate')
 
   this._debug('initializing mqtt client')
-  const client = this._client = awsIot.device({
+  const client = awsIot.device({
     region,
     protocol: 'wss',
     accessKeyId: accessKey,
@@ -238,6 +238,10 @@ Client.prototype._auth = co(function* () {
     clientId: this._clientId,
     encoding: this._encoding
   })
+
+  this._client = promisify(client)
+  this._publish = this._client.publish
+  this._subscribe = this._client.subscribe
 
   // override to do a manual PUBACK
   client.handleMessage = this.handleMessage
@@ -268,10 +272,6 @@ Client.prototype._auth = co(function* () {
     this._debug('error', err)
     this.reset()
   })
-
-  const pclient = promisify(client)
-  this._publish = pclient.publish
-  this._subscribe = pclient.subscribe
 })
 
 Client.prototype._promiseListen = function (event) {
@@ -296,8 +296,8 @@ Client.prototype.reset = co(function* (opts={}) {
   if (client) {
     this._clientEvents.remove()
     this._clientEvents = null
+    yield this.close(true)
     this._client = null
-    yield closeClient(true)
   }
 
   if (position) {
@@ -451,7 +451,7 @@ Client.prototype.close = co(function* (force) {
   if (!force) {
     try {
       yield Promise.race([
-        client.close(),
+        client.end(),
         timeoutIn(CLOSE_TIMEOUT)
       ])
 
@@ -466,7 +466,7 @@ Client.prototype.close = co(function* (force) {
   }
 
   try {
-    yield client.close(true)
+    yield client.end(true)
   } catch (err2) {
     this._debug('failed to force close, giving up', err2)
   }
