@@ -59,7 +59,7 @@ function Client ({
   this._counterparty = counterparty
   this._node = node
   this._httpOnly = httpOnly
-  this.reset({ position })
+  this._reset({ position })
 }
 
 util.inherits(Client, EventEmitter)
@@ -270,7 +270,7 @@ Client.prototype._auth = co(function* () {
   this._clientEvents.on('close', this._onclose)
   this._clientEvents.once('error', err => {
     this._debug('error', err)
-    this.reset()
+    this.emit('error', err)
   })
 })
 
@@ -278,7 +278,7 @@ Client.prototype._promiseListen = function (event) {
   return new Promise(resolve => this._myEvents.once(event, resolve))
 }
 
-Client.prototype.reset = co(function* (opts={}) {
+Client.prototype._reset = co(function* (opts={}) {
   const { position } = opts
   this._ready = false
   this._serverAheadMillis = 0
@@ -289,6 +289,7 @@ Client.prototype.reset = co(function* (opts={}) {
   }
 
   this._myEvents = new Ultron(this)
+  this._myEvents.once('error', this._reset)
   this._promiseReady = this._promiseListen('ready')
   this._promiseAuthenticated = this._promiseListen('authenticate')
   this._promiseSubscribed = this._promiseListen('subscribe')

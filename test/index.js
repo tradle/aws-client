@@ -102,24 +102,25 @@ test('catch up with server position before sending', loudCo(function* (t) {
   let delivered = false
   let closed = false
 
-  const stubPost = sinon.stub(utils, 'post').callsFake(function (url, data) {
+  const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
     if (/preauth/.test(url)) {
-      return Promise.resolve({
+      return {
         time: Date.now()
-      })
+      }
     }
 
-    return Promise.resolve({
+    return {
+      time: Date.now(),
       position: serverPos
-    })
-  })
+    }
+  }))
 
   const fakeMqttClient = new EventEmitter()
   const stubDevice = sinon.stub(awsIot, 'device').callsFake(() => {
     return fakeMqttClient
   })
 
-  fakeMqttClient.publish = function (topic, payload, opts, cb) {
+  fakeMqttClient.publish = co(function* (topic, payload, opts, cb) {
     t.equal(subscribed, true)
     t.equal(published, false)
     published = true
@@ -127,18 +128,17 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
     // artificially delay
     // to check that send() waits for ack
-    setTimeout(function () {
-      delivered = true
-      fakeMqttClient.handleMessage({
-        topic: `tradle-${clientId}/ack`,
-        payload: JSON.stringify({
-          message: {
-            link: messageLink
-          }
-        })
+    yield wait(100)
+    delivered = true
+    fakeMqttClient.handleMessage({
+      topic: `tradle-${clientId}/ack`,
+      payload: JSON.stringify({
+        message: {
+          link: messageLink
+        }
       })
-    }, 100)
-  }
+    })
+  })
 
   fakeMqttClient.subscribe = function (topics, opts, cb) {
     t.equal(subscribed, false)
@@ -227,6 +227,74 @@ test('catch up with server position before sending', loudCo(function* (t) {
   t.end()
 }))
 
+test('reset on error', loudCo(function* (t) {
+  const node = fakeNode()
+  const { permalink, identity } = node
+  const clientId = permalink.repeat(2)
+
+  let preauthCount = 0
+  let authCount = 0
+  const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
+    if (/preauth/.test(url)) {
+      preauthCount++
+      return {
+        time: Date.now()
+      }
+    }
+
+    authCount++
+    return {
+      time: Date.now(),
+      position: {
+        sent: null,
+        received: null
+      }
+    }
+  }))
+
+  const stubTip = sinon.stub(utils, 'getTip').callsFake(co(function* () {
+    // return
+  }))
+
+  const stubDevice = sinon.stub(awsIot, 'device').callsFake(function (opts) {
+    return fakeMqttClient
+  })
+
+  let forcedClose = false
+  let triedClose = false
+  const fakeMqttClient = new EventEmitter()
+  fakeMqttClient.end = function (force, cb) {
+    if (force !== true) {
+      triedClose = true
+      return hang()
+    }
+
+    forcedClose = true
+    cb()
+  }
+
+  const client = new Client({
+    endpoint,
+    clientId,
+    node
+  })
+
+  yield client.ready()
+  t.equal(preauthCount, 1)
+  t.equal(authCount, 1)
+  fakeMqttClient.emit('error', new Error('crap'))
+  t.equal(forcedClose, true)
+
+  yield client.ready()
+  t.equal(preauthCount, 2)
+  t.equal(authCount, 2)
+
+  stubDevice.restore()
+  stubPost.restore()
+  stubTip.restore()
+  t.end()
+}))
+
 function fakeNode () {
   return {
     permalink: 'a'.repeat(32),
@@ -240,5 +308,15 @@ function fakeNode () {
 }
 
 function wait (millis) {
-  return new Promise(resolve => setTimeout(resolve, 100))
+  return new Promise(resolve => setTimeout(resolve, millis))
+}
+
+function tick () {
+  return new Promise(process.nextTick)
+}
+
+function hang () {
+  return new Promise(resolve => {
+    // hang
+  })
 }
