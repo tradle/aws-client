@@ -30,9 +30,7 @@ const paths = {
 const CLOSE_TIMEOUT_ERROR = new Error('close timed out')
 const CLOSE_TIMEOUT = 1000
 const DEFAULT_ENCODING = 'utf8'
-const TOPIC_PREFIX = 'tradle-'
-const prefixTopic = topic => `${TOPIC_PREFIX}${topic}`
-const unprefixTopic = topic => topic.slice(TOPIC_PREFIX.length)
+// const TOPIC_PREFIX = 'tradle-'
 const SUB_TOPICS = ['message', 'ack', 'reject']
 // 128 KB but let's leave some wiggle room
 // MQTT messages wiggle like it's 1995
@@ -46,6 +44,7 @@ function Client ({
   endpoint,
   position,
   clientId,
+  topicPrefix,
   encoding=DEFAULT_ENCODING,
   httpOnly=false
 }) {
@@ -55,6 +54,7 @@ function Client ({
   this._endpoint = endpoint.replace(/\/+$/, '')
   this._client = null
   this._clientId = clientId
+  this._topicPrefix = topicPrefix
   this._encoding = encoding
   this._counterparty = counterparty
   this._node = node
@@ -63,8 +63,9 @@ function Client ({
 }
 
 util.inherits(Client, EventEmitter)
+const proto = Client.prototype
 
-Client.prototype._findPosition = co(function* () {
+proto._findPosition = co(function* () {
   const common = {
     node: this._node,
     counterparty: this._counterparty
@@ -78,7 +79,7 @@ Client.prototype._findPosition = co(function* () {
   this._setPosition(position)
 })
 
-Client.prototype._debug = function (...args) {
+proto._debug = function (...args) {
   if (this._node) {
     args.unshift(this._node.permalink.slice(0, 6))
   }
@@ -86,7 +87,7 @@ Client.prototype._debug = function (...args) {
   debug(...args)
 }
 
-Client.prototype._maybeStart = function () {
+proto._maybeStart = function () {
   if (!(this._node && this._position)) return
 
   this._auth().catch(err => {
@@ -96,11 +97,11 @@ Client.prototype._maybeStart = function () {
   })
 }
 
-Client.prototype.now = function () {
+proto.now = function () {
   return Date.now() + this._serverAheadMillis
 }
 
-Client.prototype._adjustServerTime = function ({ localStart, localEnd=Date.now(), serverStart }) {
+proto._adjustServerTime = function ({ localStart, localEnd=Date.now(), serverStart }) {
   const requestTime = localEnd - localStart
   // adjust for delay due to API Gateway
   const adjustedServerStart = serverStart - Math.min(requestTime / 4, 500)
@@ -110,14 +111,22 @@ Client.prototype._adjustServerTime = function ({ localStart, localEnd=Date.now()
   this._debug(`server clock ahead by ${this._serverAheadMillis}`)
 }
 
-// Client.prototype.setNode = function (node) {
+proto._prefixTopic = function (topic) {
+  return `${this._topicPrefix || ''}${topic}`
+}
+
+proto._unprefixTopic = function (topic) {
+  return topic.slice((this._topicPrefix || '').length)
+}
+
+// proto.setNode = function (node) {
 //   if (this._node) throw new Error('node already set')
 
 //   this._node = node
 //   this._maybeStart()
 // }
 
-Client.prototype._setPosition = function (position) {
+proto._setPosition = function (position) {
   if (this._position) throw new Error('position already set')
 
   this._debug('client position:', prettify(position))
@@ -129,7 +138,7 @@ Client.prototype._setPosition = function (position) {
  * @param {Object} options.sent     { link, time } of last message queued by server
  * @param {Object} options.received { link, time } of last message received by server
  */
-Client.prototype._setCatchUpTarget = function ({ sent, received }) {
+proto._setCatchUpTarget = function ({ sent, received }) {
   const onCaughtUp = () => {
     this._debug('all caught up!')
     this._ready = true
@@ -162,11 +171,11 @@ Client.prototype._setCatchUpTarget = function ({ sent, received }) {
   }
 }
 
-Client.prototype.ready = function () {
+proto.ready = function () {
   return this._promiseReady
 }
 
-Client.prototype._auth = co(function* () {
+proto._auth = co(function* () {
   const node = this._node
   const { permalink, identity } = node
   const clientId = this._clientId || (this._clientId = genClientId(permalink))
@@ -177,14 +186,19 @@ Client.prototype._auth = co(function* () {
 
   const {
     iotEndpoint,
+    iotTopicPrefix,
     region,
     accessKey,
     secretKey,
     sessionToken,
     challenge,
     // timestamp of request hitting server
-    time
+    time,
   } = yield utils.post(`${this._endpoint}/${paths.preauth}`, { clientId, identity })
+
+  if (iotTopicPrefix) {
+    this._topicPrefix = iotTopicPrefix
+  }
 
   this._adjustServerTime({
     localStart: requestStart,
@@ -249,7 +263,7 @@ Client.prototype._auth = co(function* () {
   this._clientEvents = new Ultron(client)
   this._clientEvents.on('connect', this._onconnect)
   this._clientEvents.once('connect', co(function* () {
-    const topics = SUB_TOPICS.map(topic => prefixTopic(`${this._clientId}/${topic}`))
+    const topics = SUB_TOPICS.map(topic => this._prefixTopic(`${this._clientId}/${topic}`))
     // const topics = prefixTopic(`${this._clientId}/*`)
     this._debug(`subscribing to topic: ${topics}`)
     try {
@@ -274,11 +288,11 @@ Client.prototype._auth = co(function* () {
   })
 })
 
-Client.prototype._promiseListen = function (event) {
+proto._promiseListen = function (event) {
   return new Promise(resolve => this._myEvents.once(event, resolve))
 }
 
-Client.prototype._reset = co(function* (opts={}) {
+proto._reset = co(function* (opts={}) {
   const { position } = opts
   this._ready = false
   this._serverAheadMillis = 0
@@ -308,25 +322,25 @@ Client.prototype._reset = co(function* (opts={}) {
   }
 })
 
-Client.prototype.publish = co(function* ({ topic, payload, qos=1 }) {
+proto.publish = co(function* ({ topic, payload, qos=1 }) {
   yield this._promiseAuthenticated
   this._debug(`publishing to topic: "${topic}"`)
-  return this._publish(prefixTopic(topic), stringify(payload), { qos })
+  return this._publish(this._prefixTopic(topic), stringify(payload), { qos })
 })
 
-Client.prototype._onconnect = function () {
+proto._onconnect = function () {
   this._debug('connected')
   this.emit('connect')
 }
 
-Client.prototype.onmessage = function () {
+proto.onmessage = function () {
   throw new Error('override this method')
 }
 
-Client.prototype.handleMessage = co(function* (packet, cb) {
+proto.handleMessage = co(function* (packet, cb) {
   const { topic, payload } = packet
   try {
-    yield this._handleMessage(unprefixTopic(topic.toString()), payload)
+    yield this._handleMessage(this._unprefixTopic(topic.toString()), payload)
   } catch (err) {
     this._debug('message handler failed', err)
   } finally {
@@ -334,7 +348,7 @@ Client.prototype.handleMessage = co(function* (packet, cb) {
   }
 })
 
-Client.prototype._handleMessage = co(function* (topic, payload) {
+proto._handleMessage = co(function* (topic, payload) {
   this._debug(`received "${topic}" event`)
   try {
     payload = JSON.parse(payload)
@@ -362,7 +376,7 @@ Client.prototype._handleMessage = co(function* (topic, payload) {
   }
 })
 
-Client.prototype._receiveAck = function (payload) {
+proto._receiveAck = function (payload) {
   const { message } = payload
   this._debug(`received ack for message: ${message.link}`)
   this.emit('ack', message)
@@ -370,7 +384,7 @@ Client.prototype._receiveAck = function (payload) {
   this.emit(`ack:${message.link}`, message)
 }
 
-Client.prototype._receiveReject = function (payload) {
+proto._receiveReject = function (payload) {
   const { message, reason, time } = payload
   this._debug(`server rejected message: ${stringify(reason)}`)
 
@@ -393,7 +407,7 @@ Client.prototype._receiveReject = function (payload) {
   this.emit(`reject:${message.link}`, err)
 }
 
-Client.prototype._receiveMessages = co(function* ({ messages }) {
+proto._receiveMessages = co(function* ({ messages }) {
   for (let message of messages) {
     const { recipientPubKey } = message
     const { pub } = recipientPubKey
@@ -409,7 +423,7 @@ Client.prototype._receiveMessages = co(function* ({ messages }) {
   // messages.forEach(message => this.emit('message', message))
 })
 
-// Client.prototype._bringServerUpToDate = co(function* (req) {
+// proto._bringServerUpToDate = co(function* (req) {
 //   let messages
 //   try {
 //     messages = yield Restore.conversation.respond({
@@ -430,22 +444,22 @@ Client.prototype._receiveMessages = co(function* ({ messages }) {
 //   }
 // })
 
-Client.prototype._onoffline = function () {
+proto._onoffline = function () {
   this.emit('offline')
   this._debug('offline')
 }
 
-Client.prototype._onreconnect = function () {
+proto._onreconnect = function () {
   this.emit('reconnect')
   this._debug('reconnected')
 }
 
-Client.prototype._onclose = function () {
+proto._onclose = function () {
   this.emit('disconnect')
   this._debug('disconnected')
 }
 
-Client.prototype.close = co(function* (force) {
+proto.close = co(function* (force) {
   const client = this._client
   if (!client) return
 
@@ -473,7 +487,7 @@ Client.prototype.close = co(function* (force) {
   }
 })
 
-// Client.prototype.request = co(function* (restore) {
+// proto.request = co(function* (restore) {
 //   const { seqs, gt, lt } = restore
 //   return this.publish({
 //     topic: 'restore',
@@ -481,7 +495,7 @@ Client.prototype.close = co(function* (force) {
 //   })
 // })
 
-Client.prototype.send = co(function* ({ message, link }) {
+proto.send = co(function* ({ message, link }) {
   if (this._sending) {
     throw new Error('send one message at a time!')
   }
@@ -503,12 +517,12 @@ Client.prototype.send = co(function* ({ message, link }) {
   }
 })
 
-Client.prototype._sendHTTP = co(function* ({ message, link }) {
+proto._sendHTTP = co(function* ({ message, link }) {
   this._debug('sending over HTTP')
   yield put(`${this._endpoint}/${paths.message}`, message)
 })
 
-Client.prototype._sendMQTT = co(function* ({ message, link }) {
+proto._sendMQTT = co(function* ({ message, link }) {
   this._debug('sending over MQTT')
   yield this._promiseSubscribed
   let unsub = []

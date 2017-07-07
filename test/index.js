@@ -96,6 +96,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
   const { permalink, identity } = node
   const clientId = permalink.repeat(2)
   const messageLink = '123'
+  const iotTopicPrefix = 'ooga'
 
   let subscribed = false
   let published = false
@@ -105,6 +106,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
   const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
     if (/preauth/.test(url)) {
       return {
+        iotTopicPrefix,
         time: Date.now()
       }
     }
@@ -131,7 +133,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
     yield wait(100)
     delivered = true
     fakeMqttClient.handleMessage({
-      topic: `tradle-${clientId}/ack`,
+      topic: `${iotTopicPrefix}${clientId}/ack`,
       payload: JSON.stringify({
         message: {
           link: messageLink
@@ -142,7 +144,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
   fakeMqttClient.subscribe = function (topics, opts, cb) {
     t.equal(subscribed, false)
-    t.same(topics, ['message', 'ack', 'reject'].map(topic => `tradle-${clientId}/${topic}`))
+    t.same(topics, ['message', 'ack', 'reject'].map(topic => `${iotTopicPrefix}${clientId}/${topic}`))
     subscribed = true
     cb()
   }
@@ -200,7 +202,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
   }
 
   fakeMqttClient.handleMessage({
-    topic: `tradle-${clientId}/message`,
+    topic: `${iotTopicPrefix}${clientId}/message`,
     payload: JSON.stringify({
       messages: [serverSentMessage]
     })
