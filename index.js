@@ -6,6 +6,7 @@ const awsIot = require('aws-iot-device-sdk')
 const bindAll = require('bindall')
 const Promise = require('any-promise')
 const Ultron = require('ultron')
+const { TYPE } = require('@tradle/constants')
 const utils = require('./utils')
 const {
   extend,
@@ -16,11 +17,19 @@ const {
   genNonce,
   stringify,
   prettify,
+  clone,
   isPromise,
+  replaceDataUrls,
+  parsePrefix,
+  uploadToS3,
+  serializeMessage,
 } = utils
 
 // const Restore = require('@tradle/restore')
 const debug = require('./debug')
+const DATA_URL_REGEX = /data:.+\/.+;base64,.*/g
+
+// const EMBEDDED_DATA_URL_REGEX = /\"data:[^/]+\/[^;]+;base64,[^"]*\"/g
 const paths = {
   preauth: 'preauth',
   auth: 'auth',
@@ -194,10 +203,25 @@ proto._auth = co(function* () {
     challenge,
     // timestamp of request hitting server
     time,
+    uploadPrefix
   } = yield utils.post(`${this._endpoint}/${paths.preauth}`, { clientId, identity })
 
   if (iotTopicPrefix) {
     this._topicPrefix = iotTopicPrefix
+  }
+
+  this._region = region
+  this._credentials = {
+    accessKeyId: accessKey,
+    secretAccessKey: secretKey,
+    sessionToken
+  }
+
+  if (uploadPrefix) {
+    this._uploadPrefix = uploadPrefix.replace(/^s3:\/\//, '')
+    if (!/^https?:\/\//.test(this._uploadPrefix)) {
+      this._uploadConfig = parsePrefix(this._uploadPrefix)
+    }
   }
 
   this._adjustServerTime({
@@ -207,7 +231,7 @@ proto._auth = co(function* () {
 
   const signed = yield node.sign({
     object: {
-      _t: 'tradle.ChallengeResponse',
+      [TYPE]: 'tradle.ChallengeResponse',
       clientId,
       challenge,
       permalink,
@@ -344,7 +368,7 @@ proto.handleMessage = co(function* (packet, cb) {
   } catch (err) {
     this._debug('message handler failed', err)
   } finally {
-    cb()
+    if (cb) cb()
   }
 })
 
@@ -495,6 +519,31 @@ proto.close = co(function* (force) {
 //   })
 // })
 
+proto._replaceDataUrls = co(function* (message) {
+  const unserialized = Buffer.isBuffer(message)
+    ? clone(message.unserialized)
+    : clone(message)
+
+  const replacements = replaceDataUrls(extend({
+    object: unserialized,
+  }, this._uploadConfig))
+
+  if (replacements.length) {
+    message = utils.serializeMessage(unserialized)
+    message.unserialized = unserialized
+    yield replacements.map(replacement => {
+      const opts = extend({
+        region: this._region,
+        credentials: this._credentials
+      }, replacement)
+
+      return uploadToS3(opts)
+    })
+  }
+
+  return message
+})
+
 proto.send = co(function* ({ message, link }) {
   if (this._sending) {
     throw new Error('send one message at a time!')
@@ -502,6 +551,10 @@ proto.send = co(function* ({ message, link }) {
 
   if (!this._ready) {
     throw new Error(`i haven't caught up yet, wait for "ready"`)
+  }
+
+  if (this._uploadPrefix) {
+    message = yield this._replaceDataUrls(message)
   }
 
   this._sending = link

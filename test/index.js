@@ -1,12 +1,25 @@
+const nock = require('nock')
 const { EventEmitter } = require('events')
 const test = require('tape')
 const clone = require('xtend')
 const co = require('co').wrap
 const awsIot = require('aws-iot-device-sdk')
 const sinon = require('sinon')
+// const AWS = require('aws-sdk')
+const { TYPE, SIG } = require('@tradle/constants')
 const utils = require('../utils')
+const {
+  extend,
+  post,
+  genClientId,
+  replaceDataUrls,
+  uploadToS3,
+  parsePrefix
+} = utils
+
 const endpoint = 'https://my.aws.api.gateway.endpoint'
 const Client = require('../')
+const sampleIdentity = require('./fixtures/identity')
 const loudCo = gen => {
   return co(function* (...args) {
     try {
@@ -17,6 +30,109 @@ const loudCo = gen => {
     }
   })
 }
+
+test('replace data urls', function (t) {
+  const prefix = 'mybucket/mykeyprefix'
+  const message = {
+    [TYPE]: 'tradle.Message',
+    object: {
+      blah: {
+        habla: [{
+          photo: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD"
+        }]
+      },
+      gooblae: "data:image/jpeg;base64,/8j/4AAQSkZJRgABAQAAAQABAAD"
+    }
+  }
+
+  const photo = 'https://mybucket.s3.amazonaws.com/mykeyprefixa30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b'
+  const gooblae = 'https://mybucket.s3.amazonaws.com/mykeyprefixffd81ef52c22fd853b1db477ceec2a735ef4875a17e18daa8d48a7ce1040c398'
+  const dataUrls = replaceDataUrls(extend({
+    object: message
+  }, parsePrefix(prefix)))
+
+  t.same(dataUrls, [
+    {
+      "dataUrl": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD",
+      "hash": "a30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b",
+      "body": new Buffer('ffd8ffe000104a46494600010100000100010000', 'hex'),
+      "host": "mybucket.s3.amazonaws.com",
+      "mimetype": "image/jpeg",
+      "path": "object.blah.habla.0.photo",
+      "s3Url": "https://mybucket.s3.amazonaws.com/mykeyprefixa30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b",
+      "bucket": "mybucket",
+      "key": "mykeyprefixa30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b"
+    },
+    {
+      "dataUrl": "data:image/jpeg;base64,/8j/4AAQSkZJRgABAQAAAQABAAD",
+      "hash": "ffd81ef52c22fd853b1db477ceec2a735ef4875a17e18daa8d48a7ce1040c398",
+      "body": new Buffer('ffc8ffe000104a46494600010100000100010000', 'hex'),
+      "host": "mybucket.s3.amazonaws.com",
+      "mimetype": "image/jpeg",
+      "path": "object.gooblae",
+      "s3Url": "https://mybucket.s3.amazonaws.com/mykeyprefixffd81ef52c22fd853b1db477ceec2a735ef4875a17e18daa8d48a7ce1040c398",
+      "bucket": "mybucket",
+      "key": "mykeyprefixffd81ef52c22fd853b1db477ceec2a735ef4875a17e18daa8d48a7ce1040c398"
+    }
+  ])
+
+  t.same(message, {
+    [TYPE]: 'tradle.Message',
+    object: {
+      blah: {
+        habla: [{
+          photo
+        }]
+      },
+      gooblae
+    }
+  })
+
+  t.end()
+})
+
+test.skip('upload to s3', loudCo(function* (t) {
+  let {
+    accessKey,
+    secretKey,
+    sessionToken,
+    challenge,
+    // timestamp of request hitting server
+    time,
+    uploadPrefix
+  } = yield post(
+    'https://7hixz15a6k.execute-api.us-east-1.amazonaws.com/dev/tradle/preauth',
+    {
+      clientId: genClientId(sampleIdentity.permalink),
+      identity: sampleIdentity.object
+    }
+  )
+
+  const credentials = {
+    accessKeyId: accessKey,
+    secretAccessKey: secretKey,
+    sessionToken
+  }
+
+  // console.log(JSON.stringify(credentials, null, 2))
+
+  const dataUrls = replaceDataUrls(extend({
+    object: {
+      blah: 'data:image/jpeg;base64,/8j/4AAQSkZJRgABAQAAAQABAAD'
+    }
+  }, parsePrefix(uploadPrefix)))
+
+  // nock(dataUrls[0].s3Url)
+  //   .put(function (url) {
+  //     debugger
+  //     console.log(url)
+  //     return true
+  //   })
+  //   .reply(200)
+
+  yield uploadToS3(extend(dataUrls[0], { credentials }))
+  t.end()
+}))
 
 test('init, auth', loudCo(function* (t) {
   const node = fakeNode()
@@ -214,7 +330,17 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
   yield client.send({
     message: {
-      _t: 'hello'
+      [TYPE]: 'tradle.Message',
+      [SIG]: 'abcd',
+      recipientPubKey: {
+        curve: 'p256',
+        pub: new Buffer('abcd')
+      },
+      object: {
+        [TYPE]: 'somethingelse',
+        [SIG]: 'abcd',
+        something: 'else'
+      }
     },
     link: messageLink
   })
@@ -295,6 +421,86 @@ test('reset on error', loudCo(function* (t) {
   stubPost.restore()
   stubTip.restore()
   t.end()
+}))
+
+test('upload', loudCo(function* (t) {
+  const node = fakeNode()
+  const { permalink, identity } = node
+  const messageLink = '123'
+  const iotTopicPrefix = 'ooga'
+
+  const stubTip = sinon.stub(utils, 'getTip').callsFake(co(function* () {
+    return 0
+  }))
+
+  const bucket = 'mybucket'
+  const keyPrefix = 'mykeyprefix'
+  const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
+    if (/preauth/.test(url)) {
+      return {
+        time: Date.now(),
+        uploadPrefix: `${bucket}/${keyPrefix}`,
+        accessKey: 'abc',
+        secretKey: 'def',
+        sessionToken: 'ghi'
+      }
+    }
+
+    return {
+      time: Date.now(),
+      position: {
+        sent: null,
+        received: null
+      }
+    }
+  }))
+
+  const stubDevice = sinon
+    .stub(awsIot, 'device')
+    .callsFake(opts => new EventEmitter())
+
+  const stubSerialize = sinon
+    .stub(utils, 'serializeMessage')
+    .callsFake(obj => new Buffer(JSON.stringify(obj)))
+
+  const clientId = permalink.repeat(2)
+  const client = new Client({ endpoint, clientId, node })
+  yield client.ready()
+
+  const url = `https://${bucket}.s3.amazonaws.com/${keyPrefix}a30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b`
+  client._sendMQTT = function ({ message, link }) {
+    t.equal(message.unserialized.object.photo, url)
+    t.end()
+    return Promise.resolve()
+  }
+
+  const stubFetch = sinon
+    .stub(utils, 'fetch')
+    .callsFake(function (putUrl, request) {
+      t.equal(request.method, 'PUT')
+      t.equal(putUrl, url)
+      t.same(request.body, new Buffer('ffd8ffe000104a46494600010100000100010000', 'hex'))
+      return Promise.resolve({
+        text: () => Promise.resolve()
+      })
+    })
+
+  yield client.send({
+    message: {
+      [TYPE]: 'tradle.Message',
+      object: {
+        [TYPE]: 'tradle.Somethingy',
+        photo: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD'
+      }
+    },
+    link: 'abc'
+  })
+
+  // stubFetch.restore()
+  stubSerialize.restore()
+  stubDevice.restore()
+  stubPost.restore()
+  stubTip.restore()
 }))
 
 function fakeNode () {
