@@ -7,6 +7,7 @@ const awsIot = require('aws-iot-device-sdk')
 const sinon = require('sinon')
 // const AWS = require('aws-sdk')
 const { TYPE, SIG } = require('@tradle/constants')
+const { PREFIX } = require('@tradle/embed')
 const utils = require('../utils')
 const {
   extend,
@@ -14,7 +15,8 @@ const {
   genClientId,
   replaceDataUrls,
   uploadToS3,
-  parsePrefix
+  parsePrefix,
+  decodeDataURI
 } = utils
 
 const endpoint = 'https://my.aws.api.gateway.endpoint'
@@ -31,65 +33,42 @@ const loudCo = gen => {
   })
 }
 
-test('replace data urls', function (t) {
-  const prefix = 'mybucket/mykeyprefix'
-  const message = {
-    [TYPE]: 'tradle.Message',
-    object: {
-      blah: {
-        habla: [{
-          photo: "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD"
-        }]
-      },
-      gooblae: "data:image/jpeg;base64,/8j/4AAQSkZJRgABAQAAAQABAAD"
+test('resolve embeds', loudCo(function* (t) {
+  const s3Url = 'https://mybucket.s3.amazonaws.com/mykey'
+  const object = {
+    blah: {
+      habla: `${PREFIX.unsigned}${s3Url}`
     }
   }
 
-  const photo = 'https://mybucket.s3.amazonaws.com/mykeyprefixa30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b'
-  const gooblae = 'https://mybucket.s3.amazonaws.com/mykeyprefixffd81ef52c22fd853b1db477ceec2a735ef4875a17e18daa8d48a7ce1040c398'
-  const dataUrls = replaceDataUrls(extend({
-    object: message
-  }, parsePrefix(prefix)))
+  const dataUri = 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAA='
+  const stubFetch = sinon
+    .stub(utils, 'fetch')
+    .callsFake(function (url) {
+      t.equal(url, s3Url)
+      return Promise.resolve({
+        headers: {
+          get: header => {
+            if (header === 'content-type') {
+              return 'image/jpeg'
+            }
+          }
+        },
+        arrayBuffer: () => Promise.resolve(toArrayBuffer(decodeDataURI(dataUri)))
+      })
+    })
 
-  t.same(dataUrls, [
-    {
-      "dataUrl": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD",
-      "hash": "a30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b",
-      "body": new Buffer('ffd8ffe000104a46494600010100000100010000', 'hex'),
-      "host": "mybucket.s3.amazonaws.com",
-      "mimetype": "image/jpeg",
-      "path": "object.blah.habla.0.photo",
-      "s3Url": "https://mybucket.s3.amazonaws.com/mykeyprefixa30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b",
-      "bucket": "mybucket",
-      "key": "mykeyprefixa30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b"
-    },
-    {
-      "dataUrl": "data:image/jpeg;base64,/8j/4AAQSkZJRgABAQAAAQABAAD",
-      "hash": "ffd81ef52c22fd853b1db477ceec2a735ef4875a17e18daa8d48a7ce1040c398",
-      "body": new Buffer('ffc8ffe000104a46494600010100000100010000', 'hex'),
-      "host": "mybucket.s3.amazonaws.com",
-      "mimetype": "image/jpeg",
-      "path": "object.gooblae",
-      "s3Url": "https://mybucket.s3.amazonaws.com/mykeyprefixffd81ef52c22fd853b1db477ceec2a735ef4875a17e18daa8d48a7ce1040c398",
-      "bucket": "mybucket",
-      "key": "mykeyprefixffd81ef52c22fd853b1db477ceec2a735ef4875a17e18daa8d48a7ce1040c398"
-    }
-  ])
-
-  t.same(message, {
-    [TYPE]: 'tradle.Message',
-    object: {
-      blah: {
-        habla: [{
-          photo
-        }]
-      },
-      gooblae
+  yield utils.resolveEmbeds(object)
+  t.same(object, {
+    blah: {
+      habla: dataUri
     }
   })
 
+  t.equal(stubFetch.callCount, 1)
+  stubFetch.restore()
   t.end()
-})
+}))
 
 test.skip('upload to s3', loudCo(function* (t) {
   let {
@@ -121,6 +100,12 @@ test.skip('upload to s3', loudCo(function* (t) {
       blah: 'data:image/jpeg;base64,/8j/4AAQSkZJRgABAQAAAQABAAD'
     }
   }, parsePrefix(uploadPrefix)))
+
+  console.log(JSON.stringify(extend({
+    bucket: dataUrls[0].bucket,
+    key: dataUrls[0].key,
+    body: dataUrls[0].body.toString('base64')
+  }, credentials), null, 2))
 
   // nock(dataUrls[0].s3Url)
   //   .put(function (url) {
@@ -469,7 +454,8 @@ test('upload', loudCo(function* (t) {
 
   const url = `https://${bucket}.s3.amazonaws.com/${keyPrefix}a30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b`
   client._sendMQTT = function ({ message, link }) {
-    t.equal(message.unserialized.object.photo, url)
+    const messageObj = message.unserialized.object
+    t.equal(messageObj.object.photo, `${PREFIX.unsigned}${url}`)
     t.end()
     return Promise.resolve()
   }
@@ -481,18 +467,26 @@ test('upload', loudCo(function* (t) {
       t.equal(putUrl, url)
       t.same(request.body, new Buffer('ffd8ffe000104a46494600010100000100010000', 'hex'))
       return Promise.resolve({
-        text: () => Promise.resolve()
+        text: () => Promise.resolve('')
       })
     })
 
+  const message = {
+    [TYPE]: 'tradle.Message',
+    object: {
+      [TYPE]: 'tradle.Somethingy',
+      photo: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD'
+    }
+  }
+
+  const serialized = new Buffer(JSON.stringify(message))
+  serialized.unserialized = {
+    link: 'abc',
+    object: message
+  }
+
   yield client.send({
-    message: {
-      [TYPE]: 'tradle.Message',
-      object: {
-        [TYPE]: 'tradle.Somethingy',
-        photo: 'data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD'
-      }
-    },
+    message: serialized,
     link: 'abc'
   })
 
@@ -527,4 +521,14 @@ function hang () {
   return new Promise(resolve => {
     // hang
   })
+}
+
+function toArrayBuffer (buf) {
+  const ab = new ArrayBuffer(buf.length)
+  const view = new Uint8Array(ab)
+  for (var i = 0; i < buf.length; ++i) {
+    view[i] = buf[i]
+  }
+
+  return ab
 }

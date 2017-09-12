@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@tradle/constants": "^2.1.0",
+    "@tradle/embed": "github:tradle/embed",
     "any-promise": "^1.3.0",
     "aws-iot-device-sdk": "mvayngrib/aws-iot-device-sdk-js",
     "aws-sign-web": "github:mvayngrib/aws-sign-web",
@@ -32,6 +33,7 @@
     "clone": "^2.1.1",
     "co": "^4.6.0",
     "debug": "^2.6.6",
+    "dot-prop": "^4.2.0",
     "isomorphic-fetch": "^2.2.1",
     "pify": "^3.0.0",
     "strong-data-uri": "^1.0.4",

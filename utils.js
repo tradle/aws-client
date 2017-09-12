@@ -1,17 +1,23 @@
 const crypto = require('crypto')
 const extend = require('xtend/mutable')
+const shallowClone = require('xtend')
 const fetch = require('isomorphic-fetch')
 const clone = require('clone')
 const stringify = JSON.stringify.bind(JSON)
 const co = Promise.coroutine || require('co').wrap
 const promisify = require('pify')
-const parseDataURI = require('strong-data-uri').decode
-const traverse = require('traverse')
 const { AwsSigner } = require('aws-sign-web')
+// const minio = require('minio')
 const { serializeMessage } = require('@tradle/engine').utils
+const {
+  replaceDataUrls,
+  resolveEmbeds,
+  decodeDataURI,
+  encodeDataURI
+} = require('@tradle/embed')
 
 const post = co(function* (url, data) {
-  const res = yield fetch(url, {
+  const res = yield utils.fetch(url, {
     method: 'POST',
     headers: {
       'Accept': 'application/json',
@@ -24,7 +30,7 @@ const post = co(function* (url, data) {
 })
 
 const put = co(function* (url, data) {
-  const res = yield fetch(url, {
+  const res = yield utils.fetch(url, {
     method: 'PUT',
     headers: {
       'Accept': 'application/json',
@@ -94,43 +100,19 @@ function parsePrefix (prefix) {
   return { bucket, keyPrefix }
 }
 
-function replaceDataUrls ({ object, bucket, keyPrefix }) {
-  return traverse(object).reduce(function (replacements, value) {
-    if (this.isLeaf && typeof value === 'string') {
-      if (!value.startsWith('data:')) {
-        return replacements
-      }
+const extractAndUploadEmbeds = co(function* (opts) {
+  const { object, region, credentials } = opts
+  const replacements = replaceDataUrls(opts)
+  if (replacements.length) {
+    yield replacements.map(replacement => {
+      replacement.region = region
+      replacement.credentials = credentials
+      return uploadToS3(replacement)
+    })
 
-      let body
-      try {
-        body = parseDataURI(value)
-      } catch (err) {
-        // not a data uri
-        return replacements
-      }
-
-      const hash = sha256(body)
-      const key = keyPrefix + hash
-      const host = `${bucket}.s3.amazonaws.com`
-      const s3Url = `https://${host}/${key}`
-      replacements.push({
-        dataUrl: value,
-        hash,
-        body,
-        host,
-        mimetype: body.mimetype,
-        path: this.path.join('.'),
-        s3Url,
-        bucket,
-        key
-      })
-
-      this.update(s3Url)
-    }
-
-    return replacements
-  }, [])
-}
+    return true
+  }
+})
 
 function sha256 (strOrBuffer) {
   return crypto.createHash('sha256').update(strOrBuffer).digest('hex')
@@ -159,27 +141,39 @@ const uploadToS3 = co(function* ({
       "Content-Length": body.length,
       "Host": host,
       "x-amz-content-sha256": 'UNSIGNED-PAYLOAD',
-      "x-amz-security-token": credentials.sessionToken,
     },
     body
   }
 
-  request.headers = signer.sign(request)
-  const res = yield utils.fetch(request.url, request)
-  const text = yield res.text()
-  if (res.status > 300) {
-    const err = new Error(text)
-    err.response = res
-    throw err
+  if (credentials.sessionToken) {
+    request.headers['x-amz-security-token'] = credentials.sessionToken
   }
 
+  request.headers = signer.sign(request)
+  const res = yield utils.fetch(request.url, request)
+  yield processResponse(res)
   return res
 })
 
+const download = co(function* ({ url }) {
+  const res = yield utils.fetch(url)
+  if (res.status > 300) {
+    const text = yield res.text()
+    throw new Error(text)
+  }
+
+  const arrayBuffer = yield res.arrayBuffer()
+  const buf = new Buffer(arrayBuffer)
+  buf.mimetype = res.headers.get('content-type')
+  return buf
+})
+
+const resolveS3Urls = object => resolveEmbeds({ object, resolve: download })
+
 const utils = module.exports = {
   extend,
+  shallowClone,
   clone,
-  traverse,
   co,
   promisify,
   post,
@@ -191,10 +185,13 @@ const utils = module.exports = {
   stringify,
   getTip,
   replaceDataUrls,
+  resolveEmbeds: resolveS3Urls,
   sha256,
   serializeMessage,
-  parseDataURI,
   uploadToS3,
+  extractAndUploadEmbeds,
   parsePrefix,
-  fetch
+  fetch,
+  encodeDataURI,
+  decodeDataURI
 }
