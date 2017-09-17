@@ -435,7 +435,7 @@ proto._receiveReject = function (payload) {
 }
 
 proto._receiveMessages = co(function* ({ messages }) {
-  message = yield messages.map(this._processMessage)
+  messages = yield messages.map(this._processMessage)
   this.emit('messages', messages)
   // messages.forEach(message => this.emit('message', message))
 })
@@ -581,11 +581,13 @@ proto._sendHTTP = co(function* ({ message, link }) {
 proto._sendMQTT = co(function* ({ message, link }) {
   this._debug('sending over MQTT')
   yield this._promiseSubscribed
-  let unsub = []
+
+  const miniSession = new Ultron(this)
   const promiseAck = new Promise((resolve, reject) => {
     this._debug(`waiting for ack:${link}`)
-    unsub.push(listen(this._myEvents, `ack:${link}`, resolve, true))
-    unsub.push(listen(this._myEvents, `reject:${link}`, reject, true))
+    miniSession.once(`ack:${link}`, resolve)
+    miniSession.once(`reject:${link}`, reject)
+    miniSession.once('error', reject)
   })
 
   try {
@@ -604,18 +606,11 @@ proto._sendMQTT = co(function* ({ message, link }) {
     this._debug('delivered message!')
   } finally {
     this._sending = null
-    unsub.forEach(fn => fn())
+    miniSession.destroy()
   }
 
   // this.emit('sent', message)
 })
-
-function listen (emitter, event, handler, once) {
-  emitter[once ? 'once' : 'on'](event, handler)
-  return function unsubscribe () {
-    emitter.remove(event, handler)
-  }
-}
 
 function timeoutIn (millis) {
   return new Promise((resolve, reject) => {

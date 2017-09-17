@@ -287,9 +287,15 @@ test('catch up with server position before sending', loudCo(function* (t) {
     throw err
   })
 
+  const expected = clone(serverSentMessage)
+  expected.recipientPubKey.pub = new Buffer(expected.recipientPubKey.pub.data)
   client.onmessage = function (message) {
-    t.same()
+    t.same(message, expected)
   }
+
+  client.on('messages', function (messages) {
+    t.same(messages, [expected])
+  })
 
   // should wait till it's caught up to server position
   client.on('ready', t.fail)
