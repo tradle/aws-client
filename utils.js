@@ -44,14 +44,11 @@ const put = co(function* (url, data) {
 })
 
 const processResponse = co(function* (res) {
-  const text = yield res.text()
   if (res.status > 300) {
-    throw new Error(text)
+    throw new Error(res.statusText)
   }
 
-  if (text.length) return JSON.parse(text)
-
-  return text
+  return res.json()
 })
 
 function genClientId (permalink) {
