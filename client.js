@@ -211,6 +211,10 @@ proto._auth = co(function* () {
     uploadPrefix
   } = yield utils.post(`${this._endpoint}/${paths.preauth}`, { clientId, identity })
 
+  if (iotEndpoint) {
+    this._debug('no "iotEndpoint" returned, will use http only')
+  }
+
   if (iotTopicPrefix) {
     this._topicPrefix = iotTopicPrefix
   }
@@ -268,6 +272,10 @@ proto._auth = co(function* () {
 
   this._debug('authenticated')
   this.emit('authenticate')
+
+  if (!iotEndpoint) {
+    return
+  }
 
   this._debug('initializing mqtt client')
   const client = awsIot.device({
@@ -572,9 +580,13 @@ proto.send = co(function* ({ message, link }) {
   }
 
   this._sending = link
+  const useHttp = !this._client ||
+    this._httpOnly ||
+    message.length * 1.34 > MQTT_MAX_MESSAGE_SIZE
+
   try {
     // 33% overhead from converting to base64
-    if (this._httpOnly || message.length * 1.34 > MQTT_MAX_MESSAGE_SIZE) {
+    if (useHttp) {
       yield this._sendHTTP({ message, link })
     } else {
       yield this._sendMQTT({ message, link })

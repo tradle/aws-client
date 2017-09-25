@@ -208,6 +208,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
     if (/preauth/.test(url)) {
       return {
         iotTopicPrefix,
+        iotEndpoint: 'http://localhost:37373',
         time: Date.now()
       }
     }
@@ -357,7 +358,8 @@ test('reset on error', loudCo(function* (t) {
     if (/preauth/.test(url)) {
       preauthCount++
       return {
-        time: Date.now()
+        time: Date.now(),
+        iotEndpoint: 'http://localhost:37373'
       }
     }
 
@@ -430,6 +432,7 @@ test('upload', loudCo(function* (t) {
     if (/preauth/.test(url)) {
       return {
         time: Date.now(),
+        iotEndpoint: 'http://localhost:37373',
         uploadPrefix: `${bucket}/${keyPrefix}`,
         accessKey: 'abc',
         secretKey: 'def',
