@@ -31,6 +31,8 @@ const {
 // const Restore = require('@tradle/restore')
 const debug = require('./debug')
 const DATA_URL_REGEX = /data:.+\/.+;base64,.*/g
+const TESTING = process.env.NODE_ENV === 'test'
+const RETRY_DELAY_AFTER_ERROR = TESTING ? 100 : 5000
 
 // const EMBEDDED_DATA_URL_REGEX = /\"data:[^/]+\/[^;]+;base64,[^"]*\"/g
 const paths = {
@@ -104,7 +106,7 @@ proto._maybeStart = function () {
 
   this._auth().catch(err => {
     this._authenticating = false
-    this._debug('auth failed', err.stack)
+    this._debug('auth failed')
     this.emit('error', err)
   })
 }
@@ -296,8 +298,8 @@ proto._auth = co(function* () {
     try {
       yield this._subscribe(topics, { qos: 1 })
     } catch (err) {
-      this.emit('error', err)
       this._debug('failed to subscribe')
+      this.emit('error', err)
       return
     }
 
@@ -310,7 +312,6 @@ proto._auth = co(function* () {
   this._clientEvents.on('offline', this._onoffline)
   this._clientEvents.on('close', this._onclose)
   this._clientEvents.once('error', err => {
-    this._debug('error', err)
     this.emit('error', err)
   })
 })
@@ -320,7 +321,7 @@ proto._promiseListen = function (event) {
 }
 
 proto._reset = co(function* (opts={}) {
-  const { position } = opts
+  const { position, delay } = opts
   this._ready = false
   this._serverAheadMillis = 0
   this._sending = null
@@ -330,7 +331,13 @@ proto._reset = co(function* (opts={}) {
   }
 
   this._myEvents = new Ultron(this)
-  this._myEvents.once('error', this._reset)
+  this._myEvents.once('error', err => {
+    debug('resetting due to error', err.stack)
+    this._reset({
+      delay: RETRY_DELAY_AFTER_ERROR
+    })
+  })
+
   this._promiseReady = this._promiseListen('ready')
   this._promiseAuthenticated = this._promiseListen('authenticate')
   this._promiseSubscribed = this._promiseListen('subscribe')
@@ -340,6 +347,10 @@ proto._reset = co(function* (opts={}) {
     this._clientEvents = null
     yield this.close(true)
     this._client = null
+  }
+
+  if (delay) {
+    yield wait(delay)
   }
 
   if (position) {
@@ -618,4 +629,8 @@ function timeoutIn (millis) {
       reject(CLOSE_TIMEOUT_ERROR)
     }, millis)
   })
+}
+
+function wait (millis) {
+  return new Promise(resolve => setTimeout(resolve, millis))
 }

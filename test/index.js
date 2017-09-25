@@ -473,7 +473,7 @@ test('upload', loudCo(function* (t) {
       t.equal(putUrl, url)
       t.same(request.body, new Buffer('ffd8ffe000104a46494600010100000100010000', 'hex'))
       return Promise.resolve({
-        text: () => Promise.resolve('')
+        json: () => Promise.resolve({})
       })
     })
 
