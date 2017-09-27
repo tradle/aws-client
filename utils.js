@@ -48,7 +48,13 @@ const processResponse = co(function* (res) {
     throw new Error(res.statusText)
   }
 
-  return res.json()
+  const text = yield res.text()
+  const contentType = res.headers.get('content-type') || ''
+  if (contentType.startsWith('application/json')) {
+    return JSON.parse(text)
+  }
+
+  return text
 })
 
 function genClientId (permalink) {

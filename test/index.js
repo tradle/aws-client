@@ -471,14 +471,24 @@ test('upload', loudCo(function* (t) {
 
   const stubFetch = sinon
     .stub(utils, 'fetch')
-    .callsFake(function (putUrl, request) {
+    .callsFake(co(function* (putUrl, request) {
       t.equal(request.method, 'PUT')
       t.equal(putUrl, url)
       t.same(request.body, new Buffer('ffd8ffe000104a46494600010100000100010000', 'hex'))
-      return Promise.resolve({
-        json: () => Promise.resolve({})
-      })
-    })
+      const headers = {
+        'content-type': 'application/json; charset=utf-8'
+      }
+
+      const res = {
+        status: 200,
+        headers: {
+          get: name => headers[name]
+        },
+        text: () => Promise.resolve('{}')
+      }
+
+      return res
+    }))
 
   const message = {
     [TYPE]: 'tradle.Message',
