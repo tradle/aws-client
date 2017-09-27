@@ -115,11 +115,10 @@ proto.now = function () {
   return Date.now() + this._serverAheadMillis
 }
 
-proto._adjustServerTime = function ({ localStart, localEnd=Date.now(), serverStart }) {
-  const requestTime = localEnd - localStart
+proto._adjustServerTime = function ({ localEnd=Date.now(), serverEnd }) {
   // adjust for delay due to API Gateway
-  const adjustedServerStart = serverStart - Math.min(requestTime / 4, 500)
-  const serverAheadBy = adjustedServerStart - localStart
+  const adjustedServerEnd = serverEnd - 200
+  const serverAheadBy = adjustedServerEnd - localEnd
   const prev = this._serverAheadMillis || serverAheadBy
   this._serverAheadMillis = (serverAheadBy + prev) / 2
   this._debug(`server clock ahead by ${this._serverAheadMillis}`)
@@ -234,8 +233,7 @@ proto._auth = co(function* () {
   }
 
   this._adjustServerTime({
-    localStart: requestStart,
-    serverStart: time
+    serverEnd: time
   })
 
   const signed = yield node.sign({
@@ -266,8 +264,7 @@ proto._auth = co(function* () {
   this._setCatchUpTarget(authResp.position)
 
   this._adjustServerTime({
-    localStart: requestStart,
-    serverStart: authResp.time
+    serverEnd: authResp.time
   })
 
   this._debug('authenticated')
