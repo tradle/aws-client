@@ -22,7 +22,6 @@ const {
   isPromise,
   replaceDataUrls,
   parsePrefix,
-  uploadToS3,
   resolveEmbeds,
   serializeMessage,
   extractAndUploadEmbeds
@@ -573,7 +572,13 @@ proto.send = co(function* ({ message, link }) {
   }
 
   if (this._uploadPrefix) {
-    message = yield this._replaceDataUrls(message)
+    try {
+      message = yield this._replaceDataUrls(message)
+    } catch (err) {
+      // trigger reset
+      this.emit('error', err)
+      throw err
+    }
   }
 
   this._sending = link
