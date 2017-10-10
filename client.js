@@ -9,6 +9,7 @@ const Ultron = require('ultron')
 const { TYPE } = require('@tradle/constants')
 const utils = require('./utils')
 const {
+  assert,
   extend,
   shallowClone,
   clone,
@@ -53,40 +54,44 @@ module.exports = Client
 
 function Client ({
   node,
-  counterparty,
   endpoint,
-  position,
   clientId,
-  topicPrefix,
+  topicPrefix='',
+  getSendPosition,
+  getReceivePosition,
   encoding=DEFAULT_ENCODING,
-  httpOnly=false
+  httpOnly=false,
 }) {
   EventEmitter.call(this)
   bindAll(this)
+
+  assert(typeof endpoint === 'string', 'expected string "endpoint"')
+  assert(typeof clientId === 'string', 'expected string "clientId"')
+  assert(typeof getSendPosition === 'function', 'expected function "getSendPosition"')
+  assert(typeof getReceivePosition === 'function', 'expected function "getReceivePosition"')
+  assert(node &&
+    typeof node.sign === 'function' &&
+    typeof node.permalink === 'string', 'expected "node" with function "sign" and string "permalink"')
 
   this._endpoint = endpoint.replace(/\/+$/, '')
   this._client = null
   this._clientId = clientId
   this._topicPrefix = topicPrefix
   this._encoding = encoding
-  this._counterparty = counterparty
   this._node = node
   this._httpOnly = httpOnly
-  this._reset({ position })
+  this._getSendPosition = getSendPosition
+  this._getReceivePosition = getReceivePosition
+  this._reset()
 }
 
 util.inherits(Client, EventEmitter)
 const proto = Client.prototype
 
 proto._findPosition = co(function* () {
-  const common = {
-    node: this._node,
-    counterparty: this._counterparty
-  }
-
   const position = yield {
-    sent: utils.getTip(extend({ sent: true }, common)),
-    received: utils.getTip(common)
+    sent: this._getSendPosition(),
+    received: this._getReceivePosition()
   }
 
   this._setPosition(position)

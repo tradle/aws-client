@@ -173,6 +173,10 @@ const download = co(function* ({ url }) {
 
 const resolveS3Urls = object => resolveEmbeds({ object, resolve: download })
 
+const assert = (statement, errMsg) => {
+  if (!statement) throw new Error(errMsg || 'assertion failed')
+}
+
 const utils = module.exports = {
   extend,
   shallowClone,
@@ -196,5 +200,6 @@ const utils = module.exports = {
   parsePrefix,
   fetch,
   encodeDataURI,
-  decodeDataURI
+  decodeDataURI,
+  assert
 }

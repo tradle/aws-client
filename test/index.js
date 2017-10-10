@@ -177,7 +177,9 @@ test('init, auth', loudCo(function* (t) {
   const client = new Client({
     endpoint,
     clientId,
-    node
+    node,
+    getSendPosition: () => Promise.resolve(null),
+    getReceivePosition: () => Promise.resolve(null),
   })
 
   client.on('error', err => {
@@ -277,12 +279,11 @@ test('catch up with server position before sending', loudCo(function* (t) {
     object: {}
   }
 
-  const client = new Client({
+  const client = new Client(extend({
     endpoint,
     clientId,
-    node,
-    position: serverPos
-  })
+    node
+  }, positionToGets(serverPos)))
 
   client.on('error', err => {
     throw err
@@ -397,7 +398,9 @@ test('reset on error', loudCo(function* (t) {
   const client = new Client({
     endpoint,
     clientId,
-    node
+    node,
+    getSendPosition: () => Promise.resolve(null),
+    getReceivePosition: () => Promise.resolve(null),
   })
 
   yield client.ready()
@@ -458,7 +461,14 @@ test('upload', loudCo(function* (t) {
     .callsFake(obj => new Buffer(JSON.stringify(obj)))
 
   const clientId = permalink.repeat(2)
-  const client = new Client({ endpoint, clientId, node })
+  const client = new Client({
+    endpoint,
+    clientId,
+    node,
+    getSendPosition: () => Promise.resolve(null),
+    getReceivePosition: () => Promise.resolve(null),
+  })
+
   yield client.ready()
 
   const url = `https://${bucket}.s3.amazonaws.com/${keyPrefix}a30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b`
@@ -550,4 +560,11 @@ function toArrayBuffer (buf) {
   }
 
   return ab
+}
+
+function positionToGets (position) {
+  return {
+    getSendPosition: () => Promise.resolve(position.sent),
+    getReceivePosition: () => Promise.resolve(position.received)
+  }
 }
