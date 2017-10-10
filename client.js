@@ -43,6 +43,8 @@ const paths = {
 
 const CLOSE_TIMEOUT_ERROR = new Error('close timed out')
 const CLOSE_TIMEOUT = 1000
+const SEND_TIMEOUT_ERROR = new Error('send timed out')
+const SEND_TIMEOUT = 6000
 const DEFAULT_ENCODING = 'utf8'
 // const TOPIC_PREFIX = 'tradle-'
 const SUB_TOPICS = ['message', 'ack', 'reject']
@@ -372,7 +374,9 @@ proto._reset = co(function* (opts={}) {
 proto.publish = co(function* ({ topic, payload, qos=1 }) {
   yield this._promiseAuthenticated
   this._debug(`publishing to topic: "${topic}"`)
-  return this._publish(this._prefixTopic(topic), stringify(payload), { qos })
+  const ret = yield this._publish(this._prefixTopic(topic), stringify(payload), { qos })
+  this._debug(`published to topic: "${topic}"`)
+  return ret
 })
 
 proto._onconnect = function () {
@@ -518,13 +522,16 @@ proto.close = co(function* (force) {
     try {
       yield Promise.race([
         client.end(),
-        timeoutIn(CLOSE_TIMEOUT)
+        delayThrow({
+          error: CLOSE_TIMEOUT_ERROR,
+          delay: CLOSE_TIMEOUT
+        })
       ])
 
       return
     } catch (err) {
       if (err === CLOSE_TIMEOUT_ERROR) {
-        this._debug(`nice close timed out after ${CLOSE_TIMEOUT}ms, forcing`)
+        this._debug(`polite close timed out after ${CLOSE_TIMEOUT}ms, forcing`)
       } else {
         this._debug('unexpected error on close', err)
       }
@@ -567,7 +574,7 @@ proto._replaceDataUrls = co(function* (message) {
   return serialized
 })
 
-proto.send = co(function* ({ message, link }) {
+proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
   if (this._sending) {
     throw new Error('send one message at a time!')
   }
@@ -594,21 +601,27 @@ proto.send = co(function* ({ message, link }) {
   try {
     // 33% overhead from converting to base64
     if (useHttp) {
-      yield this._sendHTTP({ message, link })
+      yield this._sendHTTP({ message, link, timeout })
     } else {
-      yield this._sendMQTT({ message, link })
+      yield this._sendMQTT({ message, link, timeout })
     }
   } finally {
     this._sending = null
   }
 })
 
-proto._sendHTTP = co(function* ({ message, link }) {
+proto._sendHTTP = co(function* ({ message, link, timeout }) {
   this._debug('sending over HTTP')
-  yield put(`${this._endpoint}/${paths.message}`, message)
+  yield Promise.race([
+    put(`${this._endpoint}/${paths.message}`, message),
+    delayThrow({
+      error: SEND_TIMEOUT_ERROR,
+      delay: timeout
+    })
+  ])
 })
 
-proto._sendMQTT = co(function* ({ message, link }) {
+proto._sendMQTT = co(function* ({ message, link, timeout }) {
   this._debug('sending over MQTT')
   yield this._promiseSubscribed
 
@@ -621,7 +634,7 @@ proto._sendMQTT = co(function* ({ message, link }) {
   })
 
   try {
-    yield this.publish({
+    const promisePublish = this.publish({
       // topic: `${this._clientId}/message`,
       topic: 'message',
       payload: {
@@ -632,8 +645,22 @@ proto._sendMQTT = co(function* ({ message, link }) {
       }
     })
 
-    yield promiseAck
+    const promiseDone = Promise.all([promisePublish, promiseAck])
+    yield Promise.race([
+      promiseDone,
+      delayThrow({
+        error: SEND_TIMEOUT_ERROR,
+        delay: timeout
+      })
+    ])
+
     this._debug('delivered message!')
+  } catch (err) {
+    if (err === SEND_TIMEOUT_ERROR) {
+      debug('publish timed out')
+      // trigger reset
+      this.emit('error', err)
+    }
   } finally {
     this._sending = null
     miniSession.destroy()
@@ -642,11 +669,11 @@ proto._sendMQTT = co(function* ({ message, link }) {
   // this.emit('sent', message)
 })
 
-function timeoutIn (millis) {
+function delayThrow ({ error, delay }) {
   return new Promise((resolve, reject) => {
     setTimeout(() => {
-      reject(CLOSE_TIMEOUT_ERROR)
-    }, millis)
+      reject(error)
+    }, delay)
   })
 }
 
