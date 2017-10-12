@@ -452,10 +452,12 @@ test('upload', loudCo(function* (t) {
     }
   }))
 
-  const stubDevice = sinon
-    .stub(awsIot, 'device')
-    .callsFake(opts => new EventEmitter())
+  const fakeMqttClient = new EventEmitter()
+  fakeMqttClient.subscribe = (topics, opts, cb) => {
+    process.nextTick(cb)
+  }
 
+  const stubDevice = sinon.stub(awsIot, 'device').callsFake(() => fakeMqttClient)
   const stubSerialize = sinon
     .stub(utils, 'serializeMessage')
     .callsFake(obj => new Buffer(JSON.stringify(obj)))
@@ -470,6 +472,7 @@ test('upload', loudCo(function* (t) {
   })
 
   yield client.ready()
+  fakeMqttClient.emit('connect')
 
   const url = `https://${bucket}.s3.amazonaws.com/${keyPrefix}a30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b`
   client._sendMQTT = function ({ message, link }) {

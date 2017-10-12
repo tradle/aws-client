@@ -15,7 +15,7 @@ const {
   clone,
   co,
   promisify,
-  put,
+  processResponse,
   genClientId,
   genNonce,
   stringify,
@@ -62,7 +62,7 @@ function Client ({
   getSendPosition,
   getReceivePosition,
   encoding=DEFAULT_ENCODING,
-  httpOnly=false,
+  httpOnly
 }) {
   EventEmitter.call(this)
   bindAll(this)
@@ -294,6 +294,9 @@ proto._auth = co(function* () {
   })
 
   this._client = promisify(client)
+  // ignore, handle in this._clientEvents
+  this._client.on('error', () => {})
+
   this._publish = this._client.publish
   this._subscribe = this._client.subscribe
 
@@ -518,14 +521,19 @@ proto.close = co(function* (force) {
   const client = this._client
   if (!client) return
 
+  const errorWatch = new Ultron(this)
+  const awaitError = new Promise((resolve, reject) => errorWatch.once('error', reject))
   if (!force) {
+    const delayedThrow = delayThrow({
+      error: CLOSE_TIMEOUT_ERROR,
+      delay: CLOSE_TIMEOUT
+    })
+
     try {
       yield Promise.race([
+        awaitError,
         client.end(),
-        delayThrow({
-          error: CLOSE_TIMEOUT_ERROR,
-          delay: CLOSE_TIMEOUT
-        })
+        delayedThrow
       ])
 
       return
@@ -535,13 +543,20 @@ proto.close = co(function* (force) {
       } else {
         this._debug('unexpected error on close', err)
       }
+    } finally {
+      delayedThrow.cancel()
     }
   }
 
   try {
-    yield client.end(true)
+    yield Promise.race([
+      awaitError,
+      client.end(true)
+    ])
   } catch (err2) {
     this._debug('failed to force close, giving up', err2)
+  } finally {
+    errorWatch.destroy()
   }
 })
 
@@ -598,6 +613,11 @@ proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
     this._httpOnly ||
     message.length * 1.34 > MQTT_MAX_MESSAGE_SIZE
 
+  yield [
+    this._promiseSubscribed,
+    this._promiseAuthenticated
+  ]
+
   try {
     // 33% overhead from converting to base64
     if (useHttp) {
@@ -612,25 +632,38 @@ proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
 
 proto._sendHTTP = co(function* ({ message, link, timeout }) {
   this._debug('sending over HTTP')
-  yield Promise.race([
-    put(`${this._endpoint}/${paths.message}`, message),
-    delayThrow({
-      error: SEND_TIMEOUT_ERROR,
-      delay: timeout
-    })
-  ])
+  const errorWatch = new Ultron(this)
+  const delayedThrow = delayThrow({
+    error: SEND_TIMEOUT_ERROR,
+    delay: timeout
+  })
+
+  try {
+    yield Promise.race([
+      new Promise((resolve, reject) => errorWatch.once('error', reject)),
+      putMessage(`${this._endpoint}/${paths.message}`, message),
+      delayedThrow
+    ])
+  } finally {
+    errorWatch.destroy()
+    delayedThrow.cancel()
+  }
 })
 
 proto._sendMQTT = co(function* ({ message, link, timeout }) {
   this._debug('sending over MQTT')
-  yield this._promiseSubscribed
-
   const miniSession = new Ultron(this)
   const promiseAck = new Promise((resolve, reject) => {
     this._debug(`waiting for ack:${link}`)
     miniSession.once(`ack:${link}`, resolve)
     miniSession.once(`reject:${link}`, reject)
     miniSession.once('error', reject)
+    this.once('error', reject)
+  })
+
+  const delayedThrow = delayThrow({
+    error: SEND_TIMEOUT_ERROR,
+    delay: timeout
   })
 
   try {
@@ -648,10 +681,7 @@ proto._sendMQTT = co(function* ({ message, link, timeout }) {
     const promiseDone = Promise.all([promisePublish, promiseAck])
     yield Promise.race([
       promiseDone,
-      delayThrow({
-        error: SEND_TIMEOUT_ERROR,
-        delay: timeout
-      })
+      delayedThrow
     ])
 
     this._debug('delivered message!')
@@ -660,23 +690,49 @@ proto._sendMQTT = co(function* ({ message, link, timeout }) {
       debug('publish timed out')
       // trigger reset
       this.emit('error', err)
+      throw err
     }
   } finally {
     this._sending = null
     miniSession.destroy()
+    delayedThrow.cancel()
   }
 
   // this.emit('sent', message)
 })
 
 function delayThrow ({ error, delay }) {
-  return new Promise((resolve, reject) => {
-    setTimeout(() => {
-      reject(error)
+  let canceled
+  let timeout
+  const promise = new Promise((resolve, reject) => {
+    timeout = setTimeout(() => {
+      if (!canceled) reject(error)
     }, delay)
   })
+
+  promise.cancel = () => {
+    canceled = true
+    if (timeout && timeout.unref) timeout.unref()
+  }
+
+  return promise
 }
 
 function wait (millis) {
   return new Promise(resolve => setTimeout(resolve, millis))
 }
+
+const putMessage = co(function* (url, data) {
+  const res = yield utils.fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json'
+    },
+    body: /^https?:\/\/localhost:/.test(url)
+      ? JSON.stringify({ message: data.unserialized.object })
+      : JSON.stringify({ message: data.toString('base64') })
+  })
+
+  return processResponse(res)
+})

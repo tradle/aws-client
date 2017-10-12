@@ -29,29 +29,21 @@ const post = co(function* (url, data) {
   return processResponse(res)
 })
 
-const put = co(function* (url, data) {
-  const res = yield utils.fetch(url, {
-    method: 'PUT',
-    headers: {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json'
-      // 'Content-Type': 'application/octet-stream'
-    },
-    body: JSON.stringify(data.toString('base64'))
-  })
-
-  return processResponse(res)
-})
-
 const processResponse = co(function* (res) {
   if (res.status > 300) {
     throw new Error(res.statusText)
   }
 
-  const text = yield res.text()
+  let text = yield res.text()
   const contentType = res.headers.get('content-type') || ''
   if (contentType.startsWith('application/json')) {
-    return JSON.parse(text)
+    try {
+      return JSON.parse(text)
+    } catch (err) {
+      // hack to support serverless-offline targets
+      text = new Buffer(text, 'base64').toString()
+      return JSON.parse(text)
+    }
   }
 
   return text
@@ -184,7 +176,7 @@ const utils = module.exports = {
   co,
   promisify,
   post,
-  put,
+  processResponse,
   genClientId,
   genNonce,
   prettify,
