@@ -531,8 +531,8 @@ proto.close = co(function* (force) {
 
     try {
       yield Promise.race([
-        awaitError,
         client.end(),
+        awaitError,
         delayedThrow
       ])
 
@@ -550,8 +550,8 @@ proto.close = co(function* (force) {
 
   try {
     yield Promise.race([
-      awaitError,
-      client.end(true)
+      client.end(true),
+      awaitError
     ])
   } catch (err2) {
     this._debug('failed to force close, giving up', err2)
@@ -618,39 +618,33 @@ proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
     this._promiseAuthenticated
   ]
 
-  try {
-    // 33% overhead from converting to base64
-    if (useHttp) {
-      yield this._sendHTTP({ message, link, timeout })
-    } else {
-      yield this._sendMQTT({ message, link, timeout })
-    }
-  } finally {
-    this._sending = null
-  }
-})
-
-proto._sendHTTP = co(function* ({ message, link, timeout }) {
-  this._debug('sending over HTTP')
   const errorWatch = new Ultron(this)
   const delayedThrow = delayThrow({
     error: SEND_TIMEOUT_ERROR,
     delay: timeout
   })
 
+  const awaitError = new Promise((resolve, reject) => errorWatch.once('error', reject))
   try {
-    yield Promise.race([
-      new Promise((resolve, reject) => errorWatch.once('error', reject)),
-      putMessage(`${this._endpoint}/${paths.message}`, message),
-      delayedThrow
-    ])
+    // 33% overhead from converting to base64
+    if (useHttp) {
+      yield this._sendHTTP({ message, link })
+    } else {
+      yield this._sendMQTT({ message, link })
+    }
   } finally {
-    errorWatch.destroy()
+    this._sending = null
     delayedThrow.cancel()
+    errorWatch.destroy()
   }
 })
 
-proto._sendMQTT = co(function* ({ message, link, timeout }) {
+proto._sendHTTP = co(function* ({ message, link }) {
+  this._debug('sending over HTTP')
+  yield putMessage(`${this._endpoint}/${paths.message}`, message)
+})
+
+proto._sendMQTT = co(function* ({ message, link }) {
   this._debug('sending over MQTT')
   const miniSession = new Ultron(this)
   const promiseAck = new Promise((resolve, reject) => {
@@ -659,11 +653,6 @@ proto._sendMQTT = co(function* ({ message, link, timeout }) {
     miniSession.once(`reject:${link}`, reject)
     miniSession.once('error', reject)
     this.once('error', reject)
-  })
-
-  const delayedThrow = delayThrow({
-    error: SEND_TIMEOUT_ERROR,
-    delay: timeout
   })
 
   try {
@@ -678,24 +667,11 @@ proto._sendMQTT = co(function* ({ message, link, timeout }) {
       }
     })
 
-    const promiseDone = Promise.all([promisePublish, promiseAck])
-    yield Promise.race([
-      promiseDone,
-      delayedThrow
-    ])
-
+    yield Promise.all([promisePublish, promiseAck])
     this._debug('delivered message!')
-  } catch (err) {
-    if (err === SEND_TIMEOUT_ERROR) {
-      debug('publish timed out')
-      // trigger reset
-      this.emit('error', err)
-      throw err
-    }
   } finally {
     this._sending = null
     miniSession.destroy()
-    delayedThrow.cancel()
   }
 
   // this.emit('sent', message)
@@ -729,6 +705,7 @@ const putMessage = co(function* (url, data) {
       'Accept': 'application/json',
       'Content-Type': 'application/json'
     },
+    // serverless-offline has poor binary support
     body: /^https?:\/\/localhost:/.test(url)
       ? JSON.stringify({ message: data.unserialized.object })
       : JSON.stringify({ message: data.toString('base64') })
