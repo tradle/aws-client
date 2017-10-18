@@ -186,7 +186,7 @@ test('init, auth', loudCo(function* (t) {
     throw err
   })
 
-  yield client.ready()
+  yield client._promiseAuthenticated
 
   stubDevice.restore()
   stubPost.restore()

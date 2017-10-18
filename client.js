@@ -1,4 +1,5 @@
 
+const parseUrl = require('url').parse
 const { EventEmitter } = require('events')
 const crypto = require('crypto')
 const util = require('util')
@@ -281,14 +282,15 @@ proto._auth = co(function* () {
   }
 
   this._debug('initializing mqtt client')
+  const [host, port] = iotEndpoint.split(':')
   const client = awsIot.device({
     region,
-    protocol: 'wss',
+    protocol: iotEndpoint.startsWith('localhost:') ? 'ws' : 'wss',
     accessKeyId: accessKey,
     secretKey: secretKey,
     sessionToken: sessionToken,
-    port: 443,
-    host: iotEndpoint,
+    port: port ? Number(port) : 443,
+    host: host,
     clientId: this._clientId,
     encoding: this._encoding
   })
@@ -352,9 +354,17 @@ proto._reset = co(function* (opts={}) {
     })
   })
 
-  this._promiseReady = this._promiseListen('ready')
   this._promiseAuthenticated = this._promiseListen('authenticate')
   this._promiseSubscribed = this._promiseListen('subscribe')
+  this._promiseReady = this._promiseListen('ready')
+  // this._promiseCaughtUp = this._promiseListen('caughtup')
+  // this._promiseReady = Promise.all([
+  //   this._promiseCaughtUp,
+  //   this._promiseSubscribed
+  // ])
+
+  this._promiseReady.then(() => this.emit('ready'))
+
   const client = this._client
   if (client) {
     this._clientEvents.remove()
