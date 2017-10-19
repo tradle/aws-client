@@ -48,7 +48,7 @@ const SEND_TIMEOUT_ERROR = new Error('send timed out')
 const SEND_TIMEOUT = 6000
 const DEFAULT_ENCODING = 'utf8'
 // const TOPIC_PREFIX = 'tradle-'
-const SUB_TOPICS = ['message', 'ack', 'reject']
+const SUB_TOPICS = ['inbox', 'ack', 'reject']
 // 128 KB but let's leave some wiggle room
 // MQTT messages wiggle like it's 1995
 const MQTT_MAX_MESSAGE_SIZE = 126 * 1000
@@ -59,7 +59,6 @@ function Client ({
   node,
   endpoint,
   clientId,
-  topicPrefix='',
   getSendPosition,
   getReceivePosition,
   encoding=DEFAULT_ENCODING,
@@ -79,7 +78,6 @@ function Client ({
   this._endpoint = endpoint.replace(/\/+$/, '')
   this._client = null
   this._clientId = clientId
-  this._topicPrefix = topicPrefix
   this._encoding = encoding
   this._node = node
   this._httpOnly = httpOnly
@@ -132,11 +130,11 @@ proto._adjustServerTime = function ({ localEnd=Date.now(), serverEnd }) {
 }
 
 proto._prefixTopic = function (topic) {
-  return `${this._topicPrefix || ''}${topic}`
+  return `${this._parentTopic}/${topic}`
 }
 
 proto._unprefixTopic = function (topic) {
-  return topic.slice((this._topicPrefix || '').length)
+  return topic.slice(this._parentTopic.length + 1) // trim slash
 }
 
 // proto.setNode = function (node) {
@@ -192,7 +190,7 @@ proto._setCatchUpTarget = function ({ sent, received }) {
 }
 
 proto.ready = function () {
-  return this._promiseReady
+  return this._promises.ready
 }
 
 proto._auth = co(function* () {
@@ -205,8 +203,9 @@ proto._auth = co(function* () {
   let requestStart = Date.now()
 
   const {
+    s3Endpoint,
     iotEndpoint,
-    iotTopicPrefix,
+    iotParentTopic,
     region,
     accessKey,
     secretKey,
@@ -217,12 +216,13 @@ proto._auth = co(function* () {
     uploadPrefix
   } = yield utils.post(`${this._endpoint}/${paths.preauth}`, { clientId, identity })
 
-  if (iotEndpoint) {
+  this._s3Endpoint = s3Endpoint
+  if (!iotEndpoint) {
     this._debug('no "iotEndpoint" returned, will use http only')
   }
 
-  if (iotTopicPrefix) {
-    this._topicPrefix = iotTopicPrefix
+  if (iotParentTopic) {
+    this._parentTopic = iotParentTopic
   }
 
   this._region = region
@@ -307,7 +307,15 @@ proto._auth = co(function* () {
 
   this._clientEvents = new Ultron(client)
   this._clientEvents.on('connect', this._onconnect)
-  this._clientEvents.once('connect', co(function* () {
+  // this._clientEvents.on('packetreceive', (...args) => {
+  //   this._debug('PACKETRECEIVE', ...args)
+  // })
+
+  // this._clientEvents.on('packetsend', (...args) => {
+  //   this._debug('PACKETSEND', ...args)
+  // })
+
+  this._clientEvents.on('connect', co(function* () {
     const topics = SUB_TOPICS.map(topic => this._prefixTopic(`${this._clientId}/${topic}`))
     // const topics = prefixTopic(`${this._clientId}/*`)
     this._debug(`subscribing to topic: ${topics}`)
@@ -354,16 +362,13 @@ proto._reset = co(function* (opts={}) {
     })
   })
 
-  this._promiseAuthenticated = this._promiseListen('authenticate')
-  this._promiseSubscribed = this._promiseListen('subscribe')
-  this._promiseReady = this._promiseListen('ready')
-  // this._promiseCaughtUp = this._promiseListen('caughtup')
-  // this._promiseReady = Promise.all([
-  //   this._promiseCaughtUp,
-  //   this._promiseSubscribed
+  this._promises = {}
+  this._breakPromises()
+  // this._promises.caughtup = this._promiseListen('caughtup')
+  // this._promises.ready = Promise.all([
+  //   this._promises.caughtup,
+  //   this._promises.subscribe
   // ])
-
-  this._promiseReady.then(() => this.emit('ready'))
 
   const client = this._client
   if (client) {
@@ -384,10 +389,21 @@ proto._reset = co(function* (opts={}) {
   }
 })
 
+proto._breakPromises = function (events=[
+  'authenticate',
+  'subscribe',
+  'ready'
+]) {
+  events.forEach(event => {
+    this._promises[event] = this._promiseListen(event)
+  })
+}
+
 proto.publish = co(function* ({ topic, payload, qos=1 }) {
-  yield this._promiseAuthenticated
+  yield this._promises.authenticate
+  topic = this._prefixTopic(topic)
   this._debug(`publishing to topic: "${topic}"`)
-  const ret = yield this._publish(this._prefixTopic(topic), stringify(payload), { qos })
+  const ret = yield this._publish(topic, stringify(payload), { qos })
   this._debug(`published to topic: "${topic}"`)
   return ret
 })
@@ -422,7 +438,7 @@ proto._handleMessage = co(function* (topic, payload) {
   }
 
   switch (topic) {
-  case `${this._clientId}/message`:
+  case `${this._clientId}/inbox`:
     yield this._receiveMessages(payload)
     break
   case `${this._clientId}/ack`:
@@ -525,15 +541,19 @@ proto._onreconnect = function () {
 proto._onclose = function () {
   this.emit('disconnect')
   this._debug('disconnected')
+  this._breakPromises(['subscribe'])
 }
 
 proto.close = co(function* (force) {
+  this._breakPromises()
+
   const client = this._client
   if (!client) return
 
   const errorWatch = new Ultron(this)
   const awaitError = new Promise((resolve, reject) => errorWatch.once('error', reject))
   if (!force) {
+    this._debug('attempting polite close')
     const delayedThrow = delayThrow({
       error: CLOSE_TIMEOUT_ERROR,
       delay: CLOSE_TIMEOUT
@@ -558,15 +578,27 @@ proto.close = co(function* (force) {
     }
   }
 
+  const delayedThrow = delayThrow({
+    error: CLOSE_TIMEOUT_ERROR,
+    delay: CLOSE_TIMEOUT
+  })
+
   try {
+    this._debug('forcing close')
     yield Promise.race([
       client.end(true),
-      awaitError
+      awaitError,
+      delayedThrow
     ])
   } catch (err2) {
-    this._debug('failed to force close, giving up', err2)
+    if (err2 === CLOSE_TIMEOUT_ERROR) {
+      this._debug(`force close timed out after ${CLOSE_TIMEOUT}ms`)
+    } else {
+      this._debug('failed to force close, giving up', err2)
+    }
   } finally {
     errorWatch.destroy()
+    delayedThrow.cancel()
   }
 })
 
@@ -586,6 +618,7 @@ proto._replaceDataUrls = co(function* (message) {
   const changed = yield extractAndUploadEmbeds(extend({
     object: copy,
     region: this._region,
+    endpoint: this._s3Endpoint,
     credentials: this._credentials,
   }, this._uploadConfig))
 
@@ -600,13 +633,14 @@ proto._replaceDataUrls = co(function* (message) {
 })
 
 proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
+  yield this.ready()
   if (this._sending) {
     throw new Error('send one message at a time!')
   }
 
-  if (!this._ready) {
-    throw new Error(`i haven't caught up yet, wait for "ready"`)
-  }
+  // if (!this._ready) {
+  //   throw new Error(`i haven't caught up yet, wait for "ready"`)
+  // }
 
   if (this._uploadPrefix) {
     try {
@@ -624,8 +658,8 @@ proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
     message.length * 1.34 > MQTT_MAX_MESSAGE_SIZE
 
   yield [
-    this._promiseSubscribed,
-    this._promiseAuthenticated
+    this._promises.subscribe,
+    this._promises.authenticate
   ]
 
   const errorWatch = new Ultron(this)
@@ -635,13 +669,13 @@ proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
   })
 
   const awaitError = new Promise((resolve, reject) => errorWatch.once('error', reject))
+  const send = useHttp ? this._sendHTTP : this._sendMQTT
   try {
-    // 33% overhead from converting to base64
-    if (useHttp) {
-      yield this._sendHTTP({ message, link })
-    } else {
-      yield this._sendMQTT({ message, link })
-    }
+    yield Promise.race([
+      send({ message, link }),
+      awaitError,
+      delayedThrow
+    ])
   } finally {
     this._sending = null
     delayedThrow.cancel()
@@ -667,8 +701,8 @@ proto._sendMQTT = co(function* ({ message, link }) {
 
   try {
     const promisePublish = this.publish({
-      // topic: `${this._clientId}/message`,
-      topic: 'message',
+      topic: `${this._clientId}/outbox`,
+      // topic: 'message',
       payload: {
         // until AWS resolves this issue:
         // https://forums.aws.amazon.com/thread.jspa?messageID=789721
@@ -698,7 +732,7 @@ function delayThrow ({ error, delay }) {
 
   promise.cancel = () => {
     canceled = true
-    if (timeout && timeout.unref) timeout.unref()
+    if (timeout) clearTimeout(timeout)
   }
 
   return promise
@@ -715,7 +749,8 @@ const putMessage = co(function* (url, data) {
       'Accept': 'application/json',
       'Content-Type': 'application/json'
     },
-    // serverless-offline has poor binary support
+    // 1. serverless-offline has poor binary support
+    // 2. 33% overhead from converting to base64
     body: /^https?:\/\/localhost:/.test(url)
       ? JSON.stringify({ message: data.unserialized.object })
       : JSON.stringify({ message: data.toString('base64') })

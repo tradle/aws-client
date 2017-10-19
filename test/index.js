@@ -186,7 +186,7 @@ test('init, auth', loudCo(function* (t) {
     throw err
   })
 
-  yield client._promiseAuthenticated
+  yield client._promises.authenticate
 
   stubDevice.restore()
   stubPost.restore()
@@ -199,7 +199,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
   const { permalink, identity } = node
   const clientId = permalink.repeat(2)
   const messageLink = '123'
-  const iotTopicPrefix = 'ooga'
+  const iotParentTopic = 'ooga'
 
   let subscribed = false
   let published = false
@@ -209,7 +209,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
   const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
     if (/preauth/.test(url)) {
       return {
-        iotTopicPrefix,
+        iotParentTopic,
         iotEndpoint: 'http://localhost:37373',
         time: Date.now()
       }
@@ -237,7 +237,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
     yield wait(100)
     delivered = true
     fakeMqttClient.handleMessage({
-      topic: `${iotTopicPrefix}${clientId}/ack`,
+      topic: `${iotParentTopic}/${clientId}/ack`,
       payload: JSON.stringify({
         message: {
           link: messageLink
@@ -248,7 +248,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
   fakeMqttClient.subscribe = function (topics, opts, cb) {
     t.equal(subscribed, false)
-    t.same(topics, ['message', 'ack', 'reject'].map(topic => `${iotTopicPrefix}${clientId}/${topic}`))
+    t.same(topics, ['inbox', 'ack', 'reject'].map(topic => `${iotParentTopic}/${clientId}/${topic}`))
     subscribed = true
     cb()
   }
@@ -304,14 +304,18 @@ test('catch up with server position before sending', loudCo(function* (t) {
   yield wait(100)
   client.removeListener('ready', t.fail)
   try {
-    yield client.send({})
+    yield Promise.race([
+      client.send({}),
+      timeoutIn(500)
+    ])
+
     t.fail('sent before ready')
   } catch (err) {
-    t.ok(/ready/.test(err))
+    t.ok(/timed out/.test(err.message))
   }
 
   fakeMqttClient.handleMessage({
-    topic: `${iotTopicPrefix}${clientId}/message`,
+    topic: `${iotParentTopic}/${clientId}/inbox`,
     payload: JSON.stringify({
       messages: [serverSentMessage]
     })
@@ -423,7 +427,7 @@ test('upload', loudCo(function* (t) {
   const node = fakeNode()
   const { permalink, identity } = node
   const messageLink = '123'
-  const iotTopicPrefix = 'ooga'
+  const iotParentTopic = 'ooga'
 
   const stubTip = sinon.stub(utils, 'getTip').callsFake(co(function* () {
     return 0
@@ -543,6 +547,14 @@ function fakeNode () {
 
 function wait (millis) {
   return new Promise(resolve => setTimeout(resolve, millis))
+}
+
+function timeoutIn (millis) {
+  return new Promise((resolve, reject) => {
+    setTimeout(() => {
+      reject(new Error('timed out'))
+    }, millis)
+  })
 }
 
 function tick () {
