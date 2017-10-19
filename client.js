@@ -90,12 +90,36 @@ util.inherits(Client, EventEmitter)
 const proto = Client.prototype
 
 proto._findPosition = co(function* () {
-  const position = yield {
-    sent: this._getSendPosition(),
-    received: this._getReceivePosition()
+  const promisePosition = Promise.all([
+    this._getSendPosition(),
+    this._getReceivePosition()
+  ])
+
+  try {
+    const [sent, received] = yield this._await(promisePosition)
+    this._setPosition({ sent, received })
+  } catch (err) {
+    this._debug('errored out while getting position', err)
+  }
+})
+
+proto._await = co(function* (promise, timeout) {
+  const errorWatch = new Ultron(this)
+  const awaitError = new Promise((resolve, reject) => errorWatch.once('error', reject))
+  const race = [
+    promise,
+    awaitError
+  ]
+
+  if (timeout) {
+    race.push(delayThrow(timeout))
   }
 
-  this._setPosition(position)
+  try {
+    return yield Promise.race(race)
+  } finally {
+    errorWatch.destroy()
+  }
 })
 
 proto._debug = function (...args) {
@@ -357,6 +381,7 @@ proto._reset = co(function* (opts={}) {
   this._myEvents = new Ultron(this)
   this._myEvents.once('error', err => {
     debug('resetting due to error', err.stack)
+    if (/premature/.test(err.message)) debugger
     this._reset({
       delay: RETRY_DELAY_AFTER_ERROR
     })
@@ -550,21 +575,13 @@ proto.close = co(function* (force) {
   const client = this._client
   if (!client) return
 
-  const errorWatch = new Ultron(this)
-  const awaitError = new Promise((resolve, reject) => errorWatch.once('error', reject))
   if (!force) {
     this._debug('attempting polite close')
-    const delayedThrow = delayThrow({
-      error: CLOSE_TIMEOUT_ERROR,
-      delay: CLOSE_TIMEOUT
-    })
-
     try {
-      yield Promise.race([
-        client.end(),
-        awaitError,
-        delayedThrow
-      ])
+      yield this._await(client.end(), {
+        error: CLOSE_TIMEOUT_ERROR,
+        delay: CLOSE_TIMEOUT
+      })
 
       return
     } catch (err) {
@@ -573,32 +590,21 @@ proto.close = co(function* (force) {
       } else {
         this._debug('unexpected error on close', err)
       }
-    } finally {
-      delayedThrow.cancel()
     }
   }
 
-  const delayedThrow = delayThrow({
-    error: CLOSE_TIMEOUT_ERROR,
-    delay: CLOSE_TIMEOUT
-  })
-
   try {
     this._debug('forcing close')
-    yield Promise.race([
-      client.end(true),
-      awaitError,
-      delayedThrow
-    ])
+    yield this._await(client.end(true), {
+      error: CLOSE_TIMEOUT_ERROR,
+      delay: CLOSE_TIMEOUT
+    })
   } catch (err2) {
     if (err2 === CLOSE_TIMEOUT_ERROR) {
       this._debug(`force close timed out after ${CLOSE_TIMEOUT}ms`)
     } else {
       this._debug('failed to force close, giving up', err2)
     }
-  } finally {
-    errorWatch.destroy()
-    delayedThrow.cancel()
   }
 })
 
@@ -662,24 +668,14 @@ proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
     this._promises.authenticate
   ]
 
-  const errorWatch = new Ultron(this)
-  const delayedThrow = delayThrow({
-    error: SEND_TIMEOUT_ERROR,
-    delay: timeout
-  })
-
-  const awaitError = new Promise((resolve, reject) => errorWatch.once('error', reject))
   const send = useHttp ? this._sendHTTP : this._sendMQTT
   try {
-    yield Promise.race([
-      send({ message, link }),
-      awaitError,
-      delayedThrow
-    ])
+    yield this._await(send({ message, link }), {
+      error: SEND_TIMEOUT_ERROR,
+      delay: timeout
+    })
   } finally {
     this._sending = null
-    delayedThrow.cancel()
-    errorWatch.destroy()
   }
 })
 
