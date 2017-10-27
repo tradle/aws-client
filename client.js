@@ -675,6 +675,10 @@ proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
       delay: timeout
     })
   } finally {
+    if (!useHttp && this._sendMQTTSession) {
+      this._sendMQTTSession.destroy()
+    }
+
     this._sending = null
   }
 })
@@ -686,12 +690,16 @@ proto._sendHTTP = co(function* ({ message, link }) {
 
 proto._sendMQTT = co(function* ({ message, link }) {
   this._debug('sending over MQTT')
-  const miniSession = new Ultron(this)
+  if (this._sendMQTTSession) {
+    this._sendMQTTSession.destroy()
+  }
+
+  this._sendMQTTSession = new Ultron(this)
   const promiseAck = new Promise((resolve, reject) => {
     this._debug(`waiting for ack:${link}`)
-    miniSession.once(`ack:${link}`, resolve)
-    miniSession.once(`reject:${link}`, reject)
-    miniSession.once('error', reject)
+    this._sendMQTTSession.once(`ack:${link}`, resolve)
+    this._sendMQTTSession.once(`reject:${link}`, reject)
+    this._sendMQTTSession.once('error', reject)
     this.once('error', reject)
   })
 
@@ -711,7 +719,8 @@ proto._sendMQTT = co(function* ({ message, link }) {
     this._debug('delivered message!')
   } finally {
     this._sending = null
-    miniSession.destroy()
+    this._sendMQTTSession.destroy()
+    this._sendMQTTSession = null
   }
 
   // this.emit('sent', message)
