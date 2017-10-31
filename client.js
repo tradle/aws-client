@@ -62,6 +62,7 @@ function Client ({
   getSendPosition,
   getReceivePosition,
   encoding=DEFAULT_ENCODING,
+  counterparty,
   httpOnly
 }) {
   EventEmitter.call(this)
@@ -80,6 +81,7 @@ function Client ({
   this._clientId = clientId
   this._encoding = encoding
   this._node = node
+  this._counterparty = counterparty
   this._httpOnly = httpOnly
   this._getSendPosition = getSendPosition
   this._getReceivePosition = getReceivePosition
@@ -123,8 +125,8 @@ proto._await = co(function* (promise, timeout) {
 })
 
 proto._debug = function (...args) {
-  if (this._node) {
-    args.unshift(this._node.permalink.slice(0, 6))
+  if (this._counterparty) {
+    args.unshift(this._counterparty.slice(0, 6))
   }
 
   debug(...args)
