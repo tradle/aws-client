@@ -696,12 +696,18 @@ proto._sendMQTT = co(function* ({ message, link }) {
   }
 
   this._sendMQTTSession = new Ultron(this)
-  const promiseAck = new Promise((resolve, reject) => {
+  const promiseAck = new Promise((_resolve, reject) => {
+    const resolve = () => {
+      // cleanup
+      this._myEvents.remove('error', reject)
+      _resolve()
+    }
+
     this._debug(`waiting for ack:${link}`)
     this._sendMQTTSession.once(`ack:${link}`, resolve)
     this._sendMQTTSession.once(`reject:${link}`, reject)
     this._sendMQTTSession.once('error', reject)
-    this.once('error', reject)
+    this._myEvents.once('error', reject)
   })
 
   try {
