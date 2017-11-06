@@ -290,7 +290,6 @@ proto._auth = co(function* () {
   } catch (err) {
     if (/timed\s+out/i.test(err.message)) return this._auth()
 
-    this.emit('error', err)
     throw err
   }
 
