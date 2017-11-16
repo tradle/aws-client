@@ -341,7 +341,7 @@ proto._auth = co(function* () {
   // })
 
   this._clientEvents.on('connect', co(function* () {
-    const topic = this._prefixTopic(`${this._clientId}/*`)
+    const topic = this._prefixTopic(`${this._clientId}/sub/+`)
     this._debug(`subscribing to topic: ${topic}`)
     try {
       yield this._subscribe(topic, { qos: 1 })
@@ -463,13 +463,13 @@ proto._handleMessage = co(function* (topic, payload) {
   }
 
   switch (topic) {
-  case `${this._clientId}/inbox`:
+  case `${this._clientId}/sub/inbox`:
     yield this._receiveMessages(payload)
     break
-  case `${this._clientId}/ack`:
+  case `${this._clientId}/sub/ack`:
     this._receiveAck(payload)
     break
-  case `${this._clientId}/reject`:
+  case `${this._clientId}/sub/reject`:
     this._receiveReject(payload)
     break
   default:
@@ -711,7 +711,7 @@ proto._sendMQTT = co(function* ({ message, link }) {
 
   try {
     const promisePublish = this.publish({
-      topic: `${this._clientId}/outbox`,
+      topic: `${this._clientId}/pub/outbox`,
       // topic: 'message',
       payload: {
         // until AWS resolves this issue:

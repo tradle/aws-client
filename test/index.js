@@ -237,7 +237,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
     yield wait(100)
     delivered = true
     fakeMqttClient.handleMessage({
-      topic: `${iotParentTopic}/${clientId}/ack`,
+      topic: `${iotParentTopic}/${clientId}/sub/ack`,
       payload: JSON.stringify({
         message: {
           link: messageLink
@@ -248,7 +248,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
   fakeMqttClient.subscribe = function (topics, opts, cb) {
     t.equal(subscribed, false)
-    t.same(topics, `${iotParentTopic}/${clientId}/*`)
+    t.same(topics, `${iotParentTopic}/${clientId}/sub/+`)
     subscribed = true
     cb()
   }
@@ -315,7 +315,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
   }
 
   fakeMqttClient.handleMessage({
-    topic: `${iotParentTopic}/${clientId}/inbox`,
+    topic: `${iotParentTopic}/${clientId}/sub/inbox`,
     payload: JSON.stringify({
       messages: [serverSentMessage]
     })
