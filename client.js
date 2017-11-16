@@ -341,11 +341,10 @@ proto._auth = co(function* () {
   // })
 
   this._clientEvents.on('connect', co(function* () {
-    const topics = SUB_TOPICS.map(topic => this._prefixTopic(`${this._clientId}/${topic}`))
-    // const topics = prefixTopic(`${this._clientId}/*`)
-    this._debug(`subscribing to topic: ${topics}`)
+    const topic = this._prefixTopic(`${this._clientId}/*`)
+    this._debug(`subscribing to topic: ${topic}`)
     try {
-      yield this._subscribe(topics, { qos: 1 })
+      yield this._subscribe(topic, { qos: 1 })
     } catch (err) {
       this._debug('failed to subscribe')
       this.emit('error', err)

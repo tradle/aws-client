@@ -248,7 +248,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
   fakeMqttClient.subscribe = function (topics, opts, cb) {
     t.equal(subscribed, false)
-    t.same(topics, ['inbox', 'ack', 'reject'].map(topic => `${iotParentTopic}/${clientId}/${topic}`))
+    t.same(topics, `${iotParentTopic}/${clientId}/*`)
     subscribed = true
     cb()
   }
