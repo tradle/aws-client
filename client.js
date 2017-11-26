@@ -461,15 +461,19 @@ proto._handleMessage = co(function* (topic, payload) {
     return
   }
 
-  switch (topic) {
-  case `${this._clientId}/sub/inbox`:
+  const actualTopic = topic.slice(this._clientId.length + 5) // cut off /sub/
+  switch (actualTopic) {
+  case 'inbox':
     yield this._receiveMessages(payload)
     break
-  case `${this._clientId}/sub/ack`:
+  case 'ack':
     this._receiveAck(payload)
     break
-  case `${this._clientId}/sub/reject`:
+  case 'reject':
     this._receiveReject(payload)
+    break
+  case 'error':
+    this.emit('error', new Error(JSON.stringify(payload || '')))
     break
   default:
     this._debug(`don't know how to handle "${topic}" events`)
