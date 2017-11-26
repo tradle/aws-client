@@ -381,7 +381,6 @@ proto._reset = co(function* (opts={}) {
   this._myEvents = new Ultron(this)
   this._myEvents.once('error', err => {
     debug('resetting due to error', err.stack)
-    if (/premature/.test(err.message)) debugger
     this._reset({
       delay: RETRY_DELAY_AFTER_ERROR
     })
@@ -658,18 +657,18 @@ proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
     }
   }
 
-  this._sending = link
   const useHttp = !this._client ||
     this._httpOnly ||
     message.length * 1.34 > MQTT_MAX_MESSAGE_SIZE
 
-  yield [
-    this._promises.subscribe,
-    this._promises.authenticate
-  ]
-
   const send = useHttp ? this._sendHTTP : this._sendMQTT
+  this._sending = link
   try {
+    yield [
+      this._promises.subscribe,
+      this._promises.authenticate
+    ]
+
     yield this._await(send({ message, link }), {
       error: SEND_TIMEOUT_ERROR,
       delay: timeout
