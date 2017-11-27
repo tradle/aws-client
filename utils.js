@@ -1,3 +1,4 @@
+const { AssertionError } = require('assert')
 const crypto = require('crypto')
 const extend = require('xtend/mutable')
 const shallowClone = require('xtend')
@@ -169,6 +170,66 @@ const assert = (statement, errMsg) => {
   if (!statement) throw new Error(errMsg || 'assertion failed')
 }
 
+const delayThrow = ({ error, delay }) => {
+  const promise = defer()
+  const timeout = setTimeout(() => promise.reject(error), delay)
+  promise.cancel = () => {
+    clearTimeout(timeout)
+    promise.resolve()
+  }
+
+  return promise
+}
+
+const wait = (millis) => {
+  return new Promise(resolve => setTimeout(resolve, millis))
+}
+
+const defer = () => {
+  let _resolve
+  let _reject
+  let p = new Promise((resolve, reject) => (
+    [_resolve, _reject] = [resolve, reject])
+  )
+
+  p.resolve = _resolve
+  p.reject = _reject
+  return p
+}
+
+const putMessage = co(function* (url, data) {
+  const res = yield utils.fetch(url, {
+    method: 'PUT',
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json'
+    },
+    // 1. serverless-offline has poor binary support
+    // 2. 33% overhead from converting to base64
+    body: /^https?:\/\/localhost:/.test(url)
+      ? JSON.stringify({ message: data.unserialized.object })
+      : JSON.stringify({ message: data.toString('base64') })
+  })
+
+  return processResponse(res)
+})
+
+const systemErrors = [
+  EvalError,
+  RangeError,
+  ReferenceError,
+  SyntaxError,
+  TypeError,
+  URIError,
+  AssertionError
+]
+
+const isDeveloperError = err => {
+  return systemErrors.some(ErrCl => {
+    return err instanceof ErrCl
+  })
+}
+
 const utils = module.exports = {
   extend,
   shallowClone,
@@ -193,5 +254,10 @@ const utils = module.exports = {
   fetch,
   encodeDataURI,
   decodeDataURI,
-  assert
+  assert,
+  wait,
+  delayThrow,
+  defer,
+  putMessage,
+  isDeveloperError
 }

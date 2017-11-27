@@ -33,6 +33,30 @@ const loudCo = gen => {
   })
 }
 
+sinon
+  .stub(utils, 'serializeMessage')
+  .callsFake(obj => new Buffer(JSON.stringify(obj)))
+
+const messageLink = '123'
+const iotParentTopic = 'ooga'
+const iotEndpoint = 'http://localhost:37373'
+const sendFixture = {
+  message: {
+    [TYPE]: 'tradle.Message',
+    [SIG]: 'abcd',
+    recipientPubKey: {
+      curve: 'p256',
+      pub: new Buffer('abcd')
+    },
+    object: {
+      [TYPE]: 'somethingelse',
+      [SIG]: 'abcd',
+      something: 'else'
+    }
+  },
+  link: messageLink
+}
+
 test('resolve embeds', loudCo(function* (t) {
   const s3Url = 'https://mybucket.s3.amazonaws.com/mykey'
   const object = {
@@ -186,7 +210,7 @@ test('init, auth', loudCo(function* (t) {
     throw err
   })
 
-  yield client._promises.authenticate
+  yield client._promiseListen('authenticated')
 
   stubDevice.restore()
   stubPost.restore()
@@ -198,8 +222,6 @@ test('catch up with server position before sending', loudCo(function* (t) {
   const node = fakeNode()
   const { permalink, identity } = node
   const clientId = permalink.repeat(2)
-  const messageLink = '123'
-  const iotParentTopic = 'ooga'
 
   let subscribed = false
   let published = false
@@ -210,7 +232,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
     if (/preauth/.test(url)) {
       return {
         iotParentTopic,
-        iotEndpoint: 'http://localhost:37373',
+        iotEndpoint,
         time: Date.now()
       }
     }
@@ -222,10 +244,11 @@ test('catch up with server position before sending', loudCo(function* (t) {
   }))
 
   const fakeMqttClient = new EventEmitter()
-  const stubDevice = sinon.stub(awsIot, 'device').callsFake(() => {
-    return fakeMqttClient
-  })
+  fakeMqttClient.end = (force, cb) => {
+    process.nextTick(cb || force)
+  }
 
+  const stubDevice = sinon.stub(awsIot, 'device').returns(fakeMqttClient)
   fakeMqttClient.publish = co(function* (topic, payload, opts, cb) {
     t.equal(subscribed, true)
     t.equal(published, false)
@@ -236,6 +259,8 @@ test('catch up with server position before sending', loudCo(function* (t) {
     // to check that send() waits for ack
     yield wait(100)
     delivered = true
+    cb()
+    yield wait(100)
     fakeMqttClient.handleMessage({
       topic: `${iotParentTopic}/${clientId}/sub/ack`,
       payload: JSON.stringify({
@@ -253,9 +278,9 @@ test('catch up with server position before sending', loudCo(function* (t) {
     cb()
   }
 
-  fakeMqttClient.end = function (cb) {
+  fakeMqttClient.end = function (force, cb) {
     closed = true
-    cb()
+    ;(cb || force)()
   }
 
   const serverPos = {
@@ -303,9 +328,10 @@ test('catch up with server position before sending', loudCo(function* (t) {
   client.on('ready', t.fail)
   yield wait(100)
   client.removeListener('ready', t.fail)
+  const promiseSend = client.send(sendFixture)
   try {
     yield Promise.race([
-      client.send({}),
+      promiseSend,
       timeoutIn(500)
     ])
 
@@ -325,22 +351,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
   fakeMqttClient.emit('connect')
 
-  yield client.send({
-    message: {
-      [TYPE]: 'tradle.Message',
-      [SIG]: 'abcd',
-      recipientPubKey: {
-        curve: 'p256',
-        pub: new Buffer('abcd')
-      },
-      object: {
-        [TYPE]: 'somethingelse',
-        [SIG]: 'abcd',
-        something: 'else'
-      }
-    },
-    link: messageLink
-  })
+  yield promiseSend
 
   t.equal(delivered, true)
   yield client.close()
@@ -364,7 +375,8 @@ test('reset on error', loudCo(function* (t) {
       preauthCount++
       return {
         time: Date.now(),
-        iotEndpoint: 'http://localhost:37373'
+        iotParentTopic,
+        iotEndpoint
       }
     }
 
@@ -378,16 +390,6 @@ test('reset on error', loudCo(function* (t) {
     }
   }))
 
-  const stubTip = sinon.stub(utils, 'getTip').callsFake(co(function* () {
-    // return
-  }))
-
-  const stubDevice = sinon.stub(awsIot, 'device').callsFake(function (opts) {
-    return fakeMqttClient
-  })
-
-  let forcedClose = false
-  let triedClose = false
   const fakeMqttClient = new EventEmitter()
   fakeMqttClient.end = function (force, cb) {
     if (force !== true) {
@@ -399,6 +401,13 @@ test('reset on error', loudCo(function* (t) {
     cb()
   }
 
+  const stubDevice = sinon.stub(awsIot, 'device').returns(fakeMqttClient)
+  const stubTip = sinon.stub(utils, 'getTip').callsFake(co(function* () {
+    // return
+  }))
+
+  let forcedClose = false
+  let triedClose = false
   const client = new Client({
     endpoint,
     clientId,
@@ -423,12 +432,138 @@ test('reset on error', loudCo(function* (t) {
   t.end()
 }))
 
+test('retryOnSend', loudCo(function* (t) {
+  const node = fakeNode()
+  const { permalink, identity } = node
+  const clientId = permalink.repeat(2)
+  const fakeMqttClient = new EventEmitter()
+
+  let authStep1Failed
+  let authStep2Failed
+  let subscribeFailed
+  let publishFailed
+  let client
+
+  const setup = ({ retryOnSend }) => {
+    authStep1Failed = false
+    authStep2Failed = false
+    subscribeFailed = false
+    publishFailed = false
+    client = new Client({
+      endpoint,
+      clientId,
+      node,
+      getSendPosition: () => Promise.resolve(null),
+      getReceivePosition: () => Promise.resolve(null),
+      retryOnSend
+    })
+
+    client.on('authenticated', () => {
+      process.nextTick(() => {
+        fakeMqttClient.emit('connect')
+      })
+    })
+  }
+
+  fakeMqttClient.subscribe = (topics, opts, cb) => {
+    if (subscribeFailed) {
+      process.nextTick(cb)
+    } else {
+      subscribeFailed = true
+      process.nextTick(() => cb(new Error('subscribe failed (test)')))
+    }
+  }
+
+  fakeMqttClient.publish = (topic, payload, opts, cb) => {
+    if (publishFailed) {
+      return process.nextTick(co(function* () {
+        cb()
+        yield wait(100)
+        fakeMqttClient.handleMessage({
+          topic: `${iotParentTopic}/${clientId}/sub/ack`,
+          payload: JSON.stringify({
+            message: {
+              link: messageLink
+            }
+          })
+        })
+      }))
+    }
+
+    publishFailed = true
+    process.nextTick(() => cb(new Error('publish failed (test)')))
+  }
+
+  fakeMqttClient.end = (force, cb) => process.nextTick(cb || force)
+
+  const stubDevice = sinon.stub(awsIot, 'device').returns(fakeMqttClient)
+  const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
+    if (/preauth/.test(url)) {
+      if (!authStep1Failed) {
+        authStep1Failed = true
+        throw new Error('auth step 1 failed (test)')
+      }
+
+      return {
+        time: Date.now(),
+        iotEndpoint,
+        iotParentTopic
+      }
+    }
+
+    if (!authStep2Failed) {
+      authStep2Failed = true
+      throw new Error('auth step 2 failed (test)')
+    }
+
+    return {
+      time: Date.now(),
+      position: {
+        sent: null,
+        received: null
+      }
+    }
+  }))
+
+  setup({ retryOnSend: false })
+
+  try {
+    yield client.send(sendFixture)
+  } catch (err) {
+    t.ok(/auth step 1/.test(err.message))
+  }
+
+  try {
+    yield client.send(sendFixture)
+  } catch (err) {
+    t.ok(/auth step 2/.test(err.message))
+  }
+
+  try {
+    yield client.send(sendFixture)
+  } catch (err) {
+    t.ok(/subscribe/.test(err.message))
+  }
+
+  try {
+    yield client.send(sendFixture)
+  } catch (err) {
+    t.ok(/publish/.test(err.message))
+  }
+
+  yield client.send(sendFixture)
+
+  setup({ retryOnSend: true })
+  yield client.send(sendFixture)
+
+  stubDevice.restore()
+  stubPost.restore()
+  t.end()
+}))
+
 test('upload', loudCo(function* (t) {
   const node = fakeNode()
   const { permalink, identity } = node
-  const messageLink = '123'
-  const iotParentTopic = 'ooga'
-
   const stubTip = sinon.stub(utils, 'getTip').callsFake(co(function* () {
     return 0
   }))
@@ -439,7 +574,8 @@ test('upload', loudCo(function* (t) {
     if (/preauth/.test(url)) {
       return {
         time: Date.now(),
-        iotEndpoint: 'http://localhost:37373',
+        iotEndpoint,
+        iotParentTopic,
         uploadPrefix: `${bucket}/${keyPrefix}`,
         accessKey: 'abc',
         secretKey: 'def',
@@ -462,10 +598,6 @@ test('upload', loudCo(function* (t) {
   }
 
   const stubDevice = sinon.stub(awsIot, 'device').callsFake(() => fakeMqttClient)
-  const stubSerialize = sinon
-    .stub(utils, 'serializeMessage')
-    .callsFake(obj => new Buffer(JSON.stringify(obj)))
-
   const clientId = permalink.repeat(2)
   const client = new Client({
     endpoint,
@@ -527,7 +659,6 @@ test('upload', loudCo(function* (t) {
   })
 
   // stubFetch.restore()
-  stubSerialize.restore()
   stubDevice.restore()
   stubPost.restore()
   stubTip.restore()

@@ -8,6 +8,7 @@ const bindAll = require('bindall')
 const Promise = require('any-promise')
 const Ultron = require('ultron')
 const { TYPE } = require('@tradle/constants')
+const RESOLVED = Promise.resolve()
 const utils = require('./utils')
 const {
   assert,
@@ -16,7 +17,6 @@ const {
   clone,
   co,
   promisify,
-  processResponse,
   genClientId,
   genNonce,
   stringify,
@@ -26,7 +26,11 @@ const {
   parsePrefix,
   resolveEmbeds,
   serializeMessage,
-  extractAndUploadEmbeds
+  extractAndUploadEmbeds,
+  wait,
+  delayThrow,
+  putMessage,
+  isDeveloperError
 } = utils
 
 // const Restore = require('@tradle/restore')
@@ -63,7 +67,8 @@ function Client ({
   getReceivePosition,
   encoding=DEFAULT_ENCODING,
   counterparty,
-  httpOnly
+  httpOnly,
+  retryOnSend=true
 }) {
   EventEmitter.call(this)
   bindAll(this)
@@ -85,6 +90,7 @@ function Client ({
   this._httpOnly = httpOnly
   this._getSendPosition = getSendPosition
   this._getReceivePosition = getReceivePosition
+  this._retryOnSend = retryOnSend
   this._reset()
 }
 
@@ -105,6 +111,11 @@ proto._findPosition = co(function* () {
   }
 })
 
+/**
+ * wait for the promise to resolve
+ * reject if an error is emitted on this instance
+ * optionally timeout
+ */
 proto._await = co(function* (promise, timeout) {
   const errorWatch = new Ultron(this)
   const awaitError = new Promise((resolve, reject) => errorWatch.once('error', reject))
@@ -121,6 +132,9 @@ proto._await = co(function* (promise, timeout) {
     return yield Promise.race(race)
   } finally {
     errorWatch.destroy()
+    if (timeout) {
+      race.pop().cancel()
+    }
   }
 })
 
@@ -216,17 +230,60 @@ proto._setCatchUpTarget = function ({ sent, received }) {
 }
 
 proto.ready = function () {
-  return this._promises.ready
+  if (this._ready) return RESOLVED
+
+  return this._promiseListen('ready')
 }
+
+proto._authStep1 = co(function* () {
+  this._step1Result = yield utils.post(`${this._endpoint}/${paths.preauth}`, {
+    clientId: this._clientId,
+    identity: this._node.identity
+  })
+
+  return this._step1Result
+})
+
+proto._authStep2 = co(function* () {
+  const signed = yield this._node.sign({
+    object: {
+      [TYPE]: 'tradle.ChallengeResponse',
+      clientId: this._clientId,
+      challenge: this._step1Result.challenge,
+      permalink: this._node.permalink,
+      // add our own nonce, to mitigate the case of a malicious server
+      // that wants us to sign a predetermined object)
+      nonce: genNonce(),
+      position: this._position
+    }
+  })
+
+  this._debug('sending challenge response')
+  let authResp
+  try {
+    authResp = yield utils.post(`${this._endpoint}/${paths.auth}`, signed.object)
+  } catch (err) {
+    if (/timed\s+out/i.test(err.message)) return this._auth()
+
+    throw err
+  }
+
+  this._setCatchUpTarget(authResp.position)
+
+  this._adjustServerTime({
+    serverEnd: authResp.time
+  })
+})
 
 proto._auth = co(function* () {
   const node = this._node
   const { permalink, identity } = node
-  const clientId = this._clientId || (this._clientId = genClientId(permalink))
+  if (!this._clientId) this._clientId = genClientId(permalink)
+
+  const clientId = this._clientId
   this._debug('clientId', clientId)
 
   this._debug('fetching temporary credentials')
-  let requestStart = Date.now()
 
   const {
     s3Endpoint,
@@ -240,7 +297,7 @@ proto._auth = co(function* () {
     // timestamp of request hitting server
     time,
     uploadPrefix
-  } = yield utils.post(`${this._endpoint}/${paths.preauth}`, { clientId, identity })
+  } = yield this._authStep1()
 
   this._s3Endpoint = s3Endpoint
   if (!iotEndpoint) {
@@ -269,38 +326,10 @@ proto._auth = co(function* () {
     serverEnd: time
   })
 
-  const signed = yield node.sign({
-    object: {
-      [TYPE]: 'tradle.ChallengeResponse',
-      clientId,
-      challenge,
-      permalink,
-      // add our own nonce, to mitigate the case of a malicious server
-      // that wants us to sign a predetermined object)
-      nonce: genNonce(),
-      position: this._position
-    }
-  })
-
-  requestStart = Date.now()
-  this._debug('sending challenge response')
-  let authResp
-  try {
-    authResp = yield utils.post(`${this._endpoint}/${paths.auth}`, signed.object)
-  } catch (err) {
-    if (/timed\s+out/i.test(err.message)) return this._auth()
-
-    throw err
-  }
-
-  this._setCatchUpTarget(authResp.position)
-
-  this._adjustServerTime({
-    serverEnd: authResp.time
-  })
-
+  yield this._authStep2()
   this._debug('authenticated')
-  this.emit('authenticate')
+  this._authenticated = true
+  this.emit('authenticated')
 
   if (!iotEndpoint) {
     return
@@ -324,9 +353,6 @@ proto._auth = co(function* () {
   // ignore, handle in this._clientEvents
   this._client.on('error', () => {})
 
-  this._publish = this._client.publish
-  this._subscribe = this._client.subscribe
-
   // override to do a manual PUBACK
   client.handleMessage = this.handleMessage
 
@@ -340,20 +366,7 @@ proto._auth = co(function* () {
   //   this._debug('PACKETSEND', ...args)
   // })
 
-  this._clientEvents.on('connect', co(function* () {
-    const topic = this._prefixTopic(`${this._clientId}/sub/+`)
-    this._debug(`subscribing to topic: ${topic}`)
-    try {
-      yield this._subscribe(topic, { qos: 1 })
-    } catch (err) {
-      this._debug('failed to subscribe')
-      this.emit('error', err)
-      return
-    }
-
-    this._debug('subscribed')
-    this.emit('subscribe')
-  }).bind(this))
+  this._clientEvents.on('connect', this._subscribe)
 
   // this.listenTo(client, 'message', this._onmessage)
   this._clientEvents.on('reconnect', this._onreconnect)
@@ -365,7 +378,7 @@ proto._auth = co(function* () {
 })
 
 proto._promiseListen = function (event) {
-  return new Promise(resolve => this._myEvents.once(event, resolve))
+  return this._await(new Promise(resolve => this._myEvents.once(event, resolve)))
 }
 
 proto._reset = co(function* (opts={}) {
@@ -386,14 +399,6 @@ proto._reset = co(function* (opts={}) {
     })
   })
 
-  this._promises = {}
-  this._breakPromises()
-  // this._promises.caughtup = this._promiseListen('caughtup')
-  // this._promises.ready = Promise.all([
-  //   this._promises.caughtup,
-  //   this._promises.subscribe
-  // ])
-
   const client = this._client
   if (client) {
     this._clientEvents.remove()
@@ -403,6 +408,7 @@ proto._reset = co(function* (opts={}) {
   }
 
   if (delay) {
+    this._debug(`waiting ${delay} before next attempt`)
     yield wait(delay)
   }
 
@@ -413,21 +419,14 @@ proto._reset = co(function* (opts={}) {
   }
 })
 
-proto._breakPromises = function (events=[
-  'authenticate',
-  'subscribe',
-  'ready'
-]) {
-  events.forEach(event => {
-    this._promises[event] = this._promiseListen(event)
-  })
-}
-
 proto.publish = co(function* ({ topic, payload, qos=1 }) {
-  yield this._promises.authenticate
+  if (!this._subscribed) {
+    yield this._await(this._promiseListen('subscribed'))
+  }
+
   topic = this._prefixTopic(topic)
   this._debug(`publishing to topic: "${topic}"`)
-  const ret = yield this._publish(topic, stringify(payload), { qos })
+  const ret = yield this._client.publish(topic, stringify(payload), { qos })
   this._debug(`published to topic: "${topic}"`)
   return ret
 })
@@ -436,6 +435,22 @@ proto._onconnect = function () {
   this._debug('connected')
   this.emit('connect')
 }
+
+proto._subscribe = co(function* () {
+  const topic = this._prefixTopic(`${this._clientId}/sub/+`)
+  this._debug(`subscribing to topic: ${topic}`)
+  try {
+    yield this._client.subscribe(topic, { qos: 1 })
+  } catch (err) {
+    this._debug('failed to subscribe')
+    this.emit('error', err)
+    return
+  }
+
+  this._debug('subscribed')
+  this._subscribed = true
+  this.emit('subscribed')
+})
 
 proto.onmessage = function () {
   throw new Error('override this method')
@@ -569,12 +584,9 @@ proto._onreconnect = function () {
 proto._onclose = function () {
   this.emit('disconnect')
   this._debug('disconnected')
-  this._breakPromises(['subscribe'])
 }
 
 proto.close = co(function* (force) {
-  this._breakPromises()
-
   const client = this._client
   if (!client) return
 
@@ -642,14 +654,21 @@ proto._replaceDataUrls = co(function* (message) {
 })
 
 proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
-  yield this.ready()
+  let attemptsLeft = getAttemptsLeft(this._retryOnSend)
+  while (attemptsLeft-- > 0) {
+    try {
+      yield this.ready()
+      return yield this._await(this._send({ message, link, timeout }))
+    } catch (err) {
+      if (isDeveloperError(err)) throw err
+    }
+  }
+})
+
+proto._send = co(function* ({ message, link, timeout }) {
   if (this._sending) {
     throw new Error('send one message at a time!')
   }
-
-  // if (!this._ready) {
-  //   throw new Error(`i haven't caught up yet, wait for "ready"`)
-  // }
 
   if (this._uploadPrefix) {
     try {
@@ -668,12 +687,7 @@ proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
   const send = useHttp ? this._sendHTTP : this._sendMQTT
   this._sending = link
   try {
-    yield [
-      this._promises.subscribe,
-      this._promises.authenticate
-    ]
-
-    yield this._await(send({ message, link }), {
+    return yield this._await(send({ message, link }), {
       error: SEND_TIMEOUT_ERROR,
       delay: timeout
     })
@@ -724,7 +738,7 @@ proto._sendMQTT = co(function* ({ message, link }) {
       }
     })
 
-    yield Promise.all([promisePublish, promiseAck])
+    yield this._await(Promise.all([promisePublish, promiseAck]))
     this._debug('delivered message!')
   } finally {
     this._sending = null
@@ -735,40 +749,9 @@ proto._sendMQTT = co(function* ({ message, link }) {
   // this.emit('sent', message)
 })
 
-function delayThrow ({ error, delay }) {
-  let canceled
-  let timeout
-  const promise = new Promise((resolve, reject) => {
-    timeout = setTimeout(() => {
-      if (!canceled) reject(error)
-    }, delay)
-  })
+const getAttemptsLeft = (retries) => {
+  if (typeof retries === 'number') return retries
+  if (retries === true) return Infinity
 
-  promise.cancel = () => {
-    canceled = true
-    if (timeout) clearTimeout(timeout)
-  }
-
-  return promise
+  return 1
 }
-
-function wait (millis) {
-  return new Promise(resolve => setTimeout(resolve, millis))
-}
-
-const putMessage = co(function* (url, data) {
-  const res = yield utils.fetch(url, {
-    method: 'PUT',
-    headers: {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json'
-    },
-    // 1. serverless-offline has poor binary support
-    // 2. 33% overhead from converting to base64
-    body: /^https?:\/\/localhost:/.test(url)
-      ? JSON.stringify({ message: data.unserialized.object })
-      : JSON.stringify({ message: data.toString('base64') })
-  })
-
-  return processResponse(res)
-})
