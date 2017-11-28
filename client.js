@@ -49,7 +49,7 @@ const paths = {
 const CLOSE_TIMEOUT_ERROR = new Error('close timed out')
 const CLOSE_TIMEOUT = 1000
 const SEND_TIMEOUT_ERROR = new Error('send timed out')
-const SEND_TIMEOUT = 6000
+const SEND_TIMEOUT = typeof __DEV__ === 'boolean' && __DEV__ ? 20000 : 6000
 const DEFAULT_ENCODING = 'utf8'
 // const TOPIC_PREFIX = 'tradle-'
 const SUB_TOPICS = ['inbox', 'ack', 'reject']
@@ -401,6 +401,12 @@ proto._reset = co(function* (opts={}) {
 
   const client = this._client
   if (client) {
+    // temporary catch
+    client.handleMessage = (packet, cb) => {
+      this._debug('ignoring event received during reset', packet)
+      cb(new Error('resetting'))
+    }
+
     this._clientEvents.remove()
     this._clientEvents = null
     yield this.close(true)
@@ -687,9 +693,13 @@ proto._send = co(function* ({ message, link, timeout }) {
   const send = useHttp ? this._sendHTTP : this._sendMQTT
   this._sending = link
   try {
-    return yield this._await(send({ message, link }), {
-      error: SEND_TIMEOUT_ERROR,
-      delay: timeout
+    return yield send({
+      message,
+      link,
+      timeout: {
+        error: SEND_TIMEOUT_ERROR,
+        delay: timeout
+      }
     })
   } finally {
     if (!useHttp && this._sendMQTTSession) {
@@ -700,30 +710,22 @@ proto._send = co(function* ({ message, link, timeout }) {
   }
 })
 
-proto._sendHTTP = co(function* ({ message, link }) {
+proto._sendHTTP = co(function* ({ message, link, timeout }) {
   this._debug('sending over HTTP')
-  yield putMessage(`${this._endpoint}/${paths.message}`, message)
+  yield this._await(putMessage(`${this._endpoint}/${paths.message}`, message), timeout)
 })
 
-proto._sendMQTT = co(function* ({ message, link }) {
+proto._sendMQTT = co(function* ({ message, link, timeout }) {
   this._debug('sending over MQTT')
   if (this._sendMQTTSession) {
     this._sendMQTTSession.destroy()
   }
 
   this._sendMQTTSession = new Ultron(this)
-  const promiseAck = new Promise((_resolve, reject) => {
-    const resolve = () => {
-      // cleanup
-      this._myEvents.remove('error', reject)
-      _resolve()
-    }
-
+  const promiseAck = new Promise((resolve, reject) => {
     this._debug(`waiting for ack:${link}`)
     this._sendMQTTSession.once(`ack:${link}`, resolve)
     this._sendMQTTSession.once(`reject:${link}`, reject)
-    this._sendMQTTSession.once('error', reject)
-    this._myEvents.once('error', reject)
   })
 
   try {
@@ -738,7 +740,7 @@ proto._sendMQTT = co(function* ({ message, link }) {
       }
     })
 
-    yield this._await(Promise.all([promisePublish, promiseAck]))
+    yield this._await(Promise.all([promisePublish, promiseAck]), timeout)
     this._debug('delivered message!')
   } finally {
     this._sending = null
