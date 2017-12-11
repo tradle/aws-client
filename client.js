@@ -381,6 +381,10 @@ proto._promiseListen = function (event) {
   return this._await(new Promise(resolve => this._myEvents.once(event, resolve)))
 }
 
+proto.reset = function reset () {
+  this._reset()
+}
+
 proto._reset = co(function* (opts={}) {
   const { position, delay } = opts
   this._ready = false
@@ -407,8 +411,11 @@ proto._reset = co(function* (opts={}) {
       cb(new Error('resetting'))
     }
 
-    this._clientEvents.remove()
-    this._clientEvents = null
+    if (this._clientEvents) {
+      this._clientEvents.remove()
+      this._clientEvents = null
+    }
+
     yield this.close(true)
     this._client = null
   }
@@ -661,14 +668,19 @@ proto._replaceDataUrls = co(function* (message) {
 
 proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
   let attemptsLeft = getAttemptsLeft(this._retryOnSend)
+  let err
   while (attemptsLeft-- > 0) {
     try {
       yield this.ready()
       return yield this._await(this._send({ message, link, timeout }))
-    } catch (err) {
-      if (isDeveloperError(err)) throw err
+    } catch (e) {
+      if (isDeveloperError(e)) throw e
+      err = e
     }
   }
+
+  this.emit('error', err)
+  throw err
 })
 
 proto._send = co(function* ({ message, link, timeout }) {
