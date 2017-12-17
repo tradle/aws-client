@@ -9,6 +9,7 @@ const sinon = require('sinon')
 // const AWS = require('aws-sdk')
 const { TYPE, SIG } = require('@tradle/constants')
 const { PREFIX } = require('@tradle/embed')
+const IotMessage = require('@tradle/iot-message')
 const utils = require('../utils')
 const {
   extend,
@@ -268,7 +269,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
     yield wait(100)
     fakeMqttClient.handleMessage({
       topic: `${iotParentTopic}/${clientId}/sub/ack`,
-      payload: encodePayload({
+      payload: yield encodePayload({
         message: {
           link: messageLink
         }
@@ -347,7 +348,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
   fakeMqttClient.handleMessage({
     topic: `${iotParentTopic}/${clientId}/sub/inbox`,
-    payload: encodePayload({
+    payload: yield encodePayload({
       messages: [serverSentMessage]
     })
   })
@@ -486,7 +487,7 @@ test('retryOnSend', loudCo(function* (t) {
         yield wait(100)
         fakeMqttClient.handleMessage({
           topic: `${iotParentTopic}/${clientId}/sub/ack`,
-          payload: encodePayload({
+          payload: yield encodePayload({
             message: {
               link: messageLink
             }
@@ -721,5 +722,5 @@ function positionToGets (position) {
 }
 
 function encodePayload (payload) {
-  return zlib.gzipSync(JSON.stringify(payload))
+  return IotMessage.encode({ payload })
 }

@@ -8,6 +8,7 @@ const bindAll = require('bindall')
 const Promise = require('any-promise')
 const Ultron = require('ultron')
 const { TYPE } = require('@tradle/constants')
+const IotMessage = require('@tradle/iot-message')
 const RESOLVED = Promise.resolve()
 const utils = require('./utils')
 const {
@@ -33,7 +34,6 @@ const {
   isDeveloperError
 } = utils
 
-const zlib = promisify(require('zlib'))
 // const Restore = require('@tradle/restore')
 const debug = require('./debug')
 const DATA_URL_REGEX = /data:.+\/.+;base64,.*/g
@@ -440,7 +440,11 @@ proto.publish = co(function* ({ topic, payload, qos=1 }) {
 
   topic = this._prefixTopic(topic)
   this._debug(`publishing to topic: "${topic}"`)
-  payload = yield zlib.gzip(payload)
+  payload = yield IotMessage.encode({
+    payload,
+    encoding: 'gzip'
+  })
+
   const ret = yield this._client.publish(topic, payload, { qos })
   this._debug(`published to topic: "${topic}"`)
   return ret
@@ -485,11 +489,7 @@ proto.handleMessage = co(function* (packet, cb) {
 proto._handleMessage = co(function* (topic, payload) {
   this._debug(`received "${topic}" event`)
   try {
-    const gzipped = typeof payload === 'string'
-      ? new Buffer(payload, 'base64')
-      : payload
-
-    payload = yield zlib.gunzip(gzipped)
+    payload = yield IotMessage.decode(payload)
     payload = JSON.parse(payload)
   } catch (err) {
     this._debug(`received non-JSON payload, skipping`, payload)
