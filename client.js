@@ -33,6 +33,7 @@ const {
   isDeveloperError
 } = utils
 
+const zlib = promisify(require('zlib'))
 // const Restore = require('@tradle/restore')
 const debug = require('./debug')
 const DATA_URL_REGEX = /data:.+\/.+;base64,.*/g
@@ -439,7 +440,8 @@ proto.publish = co(function* ({ topic, payload, qos=1 }) {
 
   topic = this._prefixTopic(topic)
   this._debug(`publishing to topic: "${topic}"`)
-  const ret = yield this._client.publish(topic, stringify(payload), { qos })
+  payload = yield zlib.gzip(payload)
+  const ret = yield this._client.publish(topic, payload, { qos })
   this._debug(`published to topic: "${topic}"`)
   return ret
 })
@@ -483,6 +485,11 @@ proto.handleMessage = co(function* (packet, cb) {
 proto._handleMessage = co(function* (topic, payload) {
   this._debug(`received "${topic}" event`)
   try {
+    const gzipped = typeof payload === 'string'
+      ? new Buffer(payload, 'base64')
+      : payload
+
+    payload = yield zlib.gunzip(gzipped)
     payload = JSON.parse(payload)
   } catch (err) {
     this._debug(`received non-JSON payload, skipping`, payload)
@@ -744,12 +751,7 @@ proto._sendMQTT = co(function* ({ message, link, timeout }) {
     const promisePublish = this.publish({
       topic: `${this._clientId}/pub/outbox`,
       // topic: 'message',
-      payload: {
-        // until AWS resolves this issue:
-        // https://forums.aws.amazon.com/thread.jspa?messageID=789721
-        // data: message.toString('base64')
-        data: message
-      }
+      payload: message
     })
 
     yield this._await(Promise.all([promisePublish, promiseAck]), timeout)

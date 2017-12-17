@@ -19,7 +19,7 @@
     "tape": "^4.6.3"
   },
   "scripts": {
-    "test": "NODE_ENV=test node test",
+    "test": "NODE_ENV=test DEBUG=*tradle* node test",
     "lint": "eslint --quiet --ignore-path .gitignore .",
     "prepush": "npm test"
   },

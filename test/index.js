@@ -1,4 +1,5 @@
 const nock = require('nock')
+const zlib = require('zlib')
 const { EventEmitter } = require('events')
 const test = require('tape')
 const clone = require('xtend')
@@ -35,13 +36,17 @@ const loudCo = gen => {
 
 sinon
   .stub(utils, 'serializeMessage')
-  .callsFake(obj => new Buffer(JSON.stringify(obj)))
+  .callsFake(obj => {
+    const serialized = new Buffer(JSON.stringify(obj))
+    serialized.unserialized = obj
+    return serialized
+  })
 
 const messageLink = '123'
 const iotParentTopic = 'ooga'
 const iotEndpoint = 'http://localhost:37373'
 const sendFixture = {
-  message: {
+  message: utils.serializeMessage({
     [TYPE]: 'tradle.Message',
     [SIG]: 'abcd',
     recipientPubKey: {
@@ -53,7 +58,7 @@ const sendFixture = {
       [SIG]: 'abcd',
       something: 'else'
     }
-  },
+  }),
   link: messageLink
 }
 
@@ -263,7 +268,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
     yield wait(100)
     fakeMqttClient.handleMessage({
       topic: `${iotParentTopic}/${clientId}/sub/ack`,
-      payload: JSON.stringify({
+      payload: encodePayload({
         message: {
           link: messageLink
         }
@@ -342,7 +347,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
   fakeMqttClient.handleMessage({
     topic: `${iotParentTopic}/${clientId}/sub/inbox`,
-    payload: JSON.stringify({
+    payload: encodePayload({
       messages: [serverSentMessage]
     })
   })
@@ -481,7 +486,7 @@ test('retryOnSend', loudCo(function* (t) {
         yield wait(100)
         fakeMqttClient.handleMessage({
           topic: `${iotParentTopic}/${clientId}/sub/ack`,
-          payload: JSON.stringify({
+          payload: encodePayload({
             message: {
               link: messageLink
             }
@@ -713,4 +718,8 @@ function positionToGets (position) {
     getSendPosition: () => Promise.resolve(position.sent),
     getReceivePosition: () => Promise.resolve(position.received)
   }
+}
+
+function encodePayload (payload) {
+  return zlib.gzipSync(JSON.stringify(payload))
 }
