@@ -158,18 +158,17 @@ test('init, auth', loudCo(function* (t) {
     time: Date.now(),
     challenge: 'abc',
     iotEndpoint: 'bs.iot.endpoint',
-    accessKey: 'a',
-    secretKey: 'b',
-    sessionToken: 'c',
     region: 'd'
   }
 
+  const authResp = getDefaultAuthResponse()
+
   const stubDevice = sinon.stub(awsIot, 'device').callsFake(function (opts) {
     t.same(opts, {
-      accessKeyId: preauthResp.accessKey,
-      secretKey: preauthResp.secretKey,
+      accessKeyId: authResp.accessKey,
+      secretKey: authResp.secretKey,
       region: preauthResp.region,
-      sessionToken: preauthResp.sessionToken,
+      sessionToken: authResp.sessionToken,
       host: preauthResp.iotEndpoint,
       port: 443,
       clientId,
@@ -194,13 +193,7 @@ test('init, auth', loudCo(function* (t) {
 
     t.equal(step, 2)
     t.equal(url, `${endpoint}/auth`)
-    return {
-      time: Date.now(),
-      position: {
-        sent: null,
-        received: null
-      }
-    }
+    return authResp
   })
 
   const clientId = permalink.repeat(2)
@@ -243,10 +236,9 @@ test('catch up with server position before sending', loudCo(function* (t) {
       }
     }
 
-    return {
-      time: Date.now(),
-      position: serverPos
-    }
+    return extend(getDefaultAuthResponse(), {
+      position: serverPos,
+    })
   }))
 
   const fakeMqttClient = new EventEmitter()
@@ -387,13 +379,7 @@ test('reset on error', loudCo(function* (t) {
     }
 
     authCount++
-    return {
-      time: Date.now(),
-      position: {
-        sent: null,
-        received: null
-      }
-    }
+    return getDefaultAuthResponse()
   }))
 
   const fakeMqttClient = new EventEmitter()
@@ -522,13 +508,7 @@ test('retryOnSend', loudCo(function* (t) {
       throw new Error('auth step 2 failed (test)')
     }
 
-    return {
-      time: Date.now(),
-      position: {
-        sent: null,
-        received: null
-      }
-    }
+    return getDefaultAuthResponse()
   }))
 
   setup({ retryOnSend: false })
@@ -582,20 +562,15 @@ test('upload', loudCo(function* (t) {
         time: Date.now(),
         iotEndpoint,
         iotParentTopic,
-        uploadPrefix: `${bucket}/${keyPrefix}`,
         accessKey: 'abc',
         secretKey: 'def',
         sessionToken: 'ghi'
       }
     }
 
-    return {
-      time: Date.now(),
-      position: {
-        sent: null,
-        received: null
-      }
-    }
+    return extend(getDefaultAuthResponse(), {
+      uploadPrefix: `${bucket}/${keyPrefix}`
+    })
   }))
 
   const fakeMqttClient = new EventEmitter()
@@ -723,4 +698,22 @@ function positionToGets (position) {
 
 function encodePayload (payload) {
   return IotMessage.encode({ payload })
+}
+
+function getCredentials () {
+  return {
+    accessKey: 'abc',
+    secretKey: 'def',
+    sessionToken: 'ghi'
+  }
+}
+
+function getDefaultAuthResponse () {
+  return extend(getCredentials(), {
+    time: Date.now(),
+    position: {
+      sent: null,
+      received: null
+    }
+  })
 }

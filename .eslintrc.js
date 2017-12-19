@@ -250,10 +250,7 @@ module.exports = {
         ],
         "space-infix-ops": "off",
         "space-unary-ops": "error",
-        "spaced-comment": [
-            "error",
-            "always"
-        ],
+        "spaced-comment": "warn",
         "strict": "error",
         "symbol-description": "error",
         "template-curly-spacing": [

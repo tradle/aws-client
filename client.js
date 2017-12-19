@@ -3,6 +3,7 @@ const parseUrl = require('url').parse
 const { EventEmitter } = require('events')
 const crypto = require('crypto')
 const util = require('util')
+const pick = require('object.pick')
 const awsIot = require('aws-iot-device-sdk')
 const bindAll = require('bindall')
 const Promise = require('any-promise')
@@ -50,7 +51,7 @@ const paths = {
 const CLOSE_TIMEOUT_ERROR = new Error('close timed out')
 const CLOSE_TIMEOUT = 1000
 const SEND_TIMEOUT_ERROR = new Error('send timed out')
-const SEND_TIMEOUT = typeof __DEV__ === 'boolean' && __DEV__ ? 20000 : 6000
+const SEND_TIMEOUT = 6000
 const DEFAULT_ENCODING = 'utf8'
 // const TOPIC_PREFIX = 'tradle-'
 const SUB_TOPICS = ['inbox', 'ack', 'reject']
@@ -242,8 +243,27 @@ proto._authStep1 = co(function* () {
     identity: this._node.identity
   })
 
+  this._postProcessAuthResponse(this._step1Result)
   return this._step1Result
 })
+
+proto._postProcessAuthResponse = function (obj) {
+  const { accessKey, secretKey, sessionToken, uploadPrefix } = obj
+  if (accessKey) {
+    this._credentials = {
+      accessKeyId: accessKey,
+      secretAccessKey: secretKey,
+      sessionToken
+    }
+  }
+
+  if (uploadPrefix) {
+    this._uploadPrefix = uploadPrefix.replace(/^s3:\/\//, '')
+    if (!/^https?:\/\//.test(this._uploadPrefix)) {
+      this._uploadConfig = parsePrefix(this._uploadPrefix)
+    }
+  }
+}
 
 proto._authStep2 = co(function* () {
   const signed = yield this._node.sign({
@@ -260,20 +280,21 @@ proto._authStep2 = co(function* () {
   })
 
   this._debug('sending challenge response')
-  let authResp
   try {
-    authResp = yield utils.post(`${this._endpoint}/${paths.auth}`, signed.object)
+    this._step2Result = yield utils.post(`${this._endpoint}/${paths.auth}`, signed.object)
   } catch (err) {
     if (/timed\s+out/i.test(err.message)) return this._auth()
 
     throw err
   }
 
-  this._setCatchUpTarget(authResp.position)
-
+  this._setCatchUpTarget(this._step2Result.position)
   this._adjustServerTime({
-    serverEnd: authResp.time
+    serverEnd: this._step2Result.time
   })
+
+  this._postProcessAuthResponse(this._step2Result)
+  return this._step2Result
 })
 
 proto._auth = co(function* () {
@@ -291,13 +312,9 @@ proto._auth = co(function* () {
     iotEndpoint,
     iotParentTopic,
     region,
-    accessKey,
-    secretKey,
-    sessionToken,
     challenge,
     // timestamp of request hitting server
-    time,
-    uploadPrefix
+    time
   } = yield this._authStep1()
 
   this._s3Endpoint = s3Endpoint
@@ -310,24 +327,13 @@ proto._auth = co(function* () {
   }
 
   this._region = region
-  this._credentials = {
-    accessKeyId: accessKey,
-    secretAccessKey: secretKey,
-    sessionToken
-  }
-
-  if (uploadPrefix) {
-    this._uploadPrefix = uploadPrefix.replace(/^s3:\/\//, '')
-    if (!/^https?:\/\//.test(this._uploadPrefix)) {
-      this._uploadConfig = parsePrefix(this._uploadPrefix)
-    }
-  }
 
   this._adjustServerTime({
     serverEnd: time
   })
 
   yield this._authStep2()
+
   this._debug('authenticated')
   this._authenticated = true
   this.emit('authenticated')
@@ -341,9 +347,9 @@ proto._auth = co(function* () {
   const client = awsIot.device({
     region,
     protocol: iotEndpoint.startsWith('localhost:') ? 'ws' : 'wss',
-    accessKeyId: accessKey,
-    secretKey: secretKey,
-    sessionToken: sessionToken,
+    accessKeyId: this._credentials.accessKeyId,
+    secretKey: this._credentials.secretAccessKey,
+    sessionToken: this._credentials.sessionToken,
     port: port ? Number(port) : 443,
     host: host,
     clientId: this._clientId,
