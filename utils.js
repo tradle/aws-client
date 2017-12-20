@@ -197,9 +197,9 @@ const defer = () => {
   return p
 }
 
-const putMessage = co(function* (url, data) {
+const postMessage = co(function* (url, message) {
   const res = yield utils.fetch(url, {
-    method: 'PUT',
+    method: 'POST',
     headers: {
       'Accept': 'application/json',
       'Content-Type': 'application/json'
@@ -207,8 +207,8 @@ const putMessage = co(function* (url, data) {
     // 1. serverless-offline has poor binary support
     // 2. 33% overhead from converting to base64
     body: /^https?:\/\/localhost:/.test(url)
-      ? JSON.stringify({ message: data.unserialized.object })
-      : JSON.stringify({ message: data.toString('base64') })
+      ? JSON.stringify({ messages: [message.unserialized.object] })
+      : JSON.stringify({ messages: [message] })
   })
 
   return processResponse(res)
@@ -258,6 +258,6 @@ const utils = module.exports = {
   wait,
   delayThrow,
   defer,
-  putMessage,
+  postMessage,
   isDeveloperError
 }

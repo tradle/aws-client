@@ -31,7 +31,7 @@ const {
   extractAndUploadEmbeds,
   wait,
   delayThrow,
-  putMessage,
+  postMessage,
   isDeveloperError
 } = utils
 
@@ -45,7 +45,7 @@ const RETRY_DELAY_AFTER_ERROR = TESTING ? 100 : 5000
 const paths = {
   preauth: 'preauth',
   auth: 'auth',
-  message: 'message'
+  inbox: 'inbox'
 }
 
 const CLOSE_TIMEOUT_ERROR = new Error('close timed out')
@@ -737,7 +737,7 @@ proto._send = co(function* ({ message, link, timeout }) {
 
 proto._sendHTTP = co(function* ({ message, link, timeout }) {
   this._debug('sending over HTTP')
-  yield this._await(putMessage(`${this._endpoint}/${paths.message}`, message), timeout)
+  yield this._await(postMessage(`${this._endpoint}/${paths.inbox}`, message), timeout)
 })
 
 proto._sendMQTT = co(function* ({ message, link, timeout }) {
