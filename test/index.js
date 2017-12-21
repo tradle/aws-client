@@ -424,24 +424,18 @@ test('reset on error', loudCo(function* (t) {
   t.end()
 }))
 
-test('retryOnSend', loudCo(function* (t) {
-  const node = fakeNode()
-  const { permalink, identity } = node
-  const clientId = permalink.repeat(2)
-  const fakeMqttClient = new EventEmitter()
+;[false, true].forEach(retryOnSend => {
+  test(`retryOnSend (${retryOnSend})`, loudCo(function* (t) {
+    const node = fakeNode()
+    const { permalink, identity } = node
 
-  let authStep1Failed
-  let authStep2Failed
-  let subscribeFailed
-  let publishFailed
-  let client
+    let authStep1Failed
+    let authStep2Failed
+    let subscribeFailed
+    let publishFailed
 
-  const setup = ({ retryOnSend }) => {
-    authStep1Failed = false
-    authStep2Failed = false
-    subscribeFailed = false
-    publishFailed = false
-    client = new Client({
+    const clientId = permalink.repeat(2)
+    const client = new Client({
       endpoint,
       clientId,
       node,
@@ -455,97 +449,97 @@ test('retryOnSend', loudCo(function* (t) {
         fakeMqttClient.emit('connect')
       })
     })
-  }
 
-  fakeMqttClient.subscribe = (topics, opts, cb) => {
-    if (subscribeFailed) {
-      process.nextTick(cb)
-    } else {
-      subscribeFailed = true
-      process.nextTick(() => cb(new Error('subscribe failed (test)')))
+    const fakeMqttClient = new EventEmitter()
+    fakeMqttClient.subscribe = (topics, opts, cb) => {
+      if (subscribeFailed) {
+        process.nextTick(cb)
+      } else {
+        subscribeFailed = true
+        process.nextTick(() => cb(new Error('subscribe failed (test)')))
+      }
     }
-  }
 
-  fakeMqttClient.publish = (topic, payload, opts, cb) => {
-    if (publishFailed) {
-      return process.nextTick(co(function* () {
-        cb()
-        yield wait(100)
-        fakeMqttClient.handleMessage({
-          topic: `${iotParentTopic}/${clientId}/sub/ack`,
-          payload: yield encodePayload({
-            message: {
-              link: messageLink
-            }
+    fakeMqttClient.publish = (topic, payload, opts, cb) => {
+      if (publishFailed) {
+        return process.nextTick(co(function* () {
+          cb()
+          yield wait(100)
+          fakeMqttClient.handleMessage({
+            topic: `${iotParentTopic}/${clientId}/sub/ack`,
+            payload: yield encodePayload({
+              message: {
+                link: messageLink
+              }
+            })
           })
-        })
-      }))
-    }
-
-    publishFailed = true
-    process.nextTick(() => cb(new Error('publish failed (test)')))
-  }
-
-  fakeMqttClient.end = (force, cb) => process.nextTick(cb || force)
-
-  const stubDevice = sinon.stub(awsIot, 'device').returns(fakeMqttClient)
-  const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
-    if (/preauth/.test(url)) {
-      if (!authStep1Failed) {
-        authStep1Failed = true
-        throw new Error('auth step 1 failed (test)')
+        }))
       }
 
-      return {
-        time: Date.now(),
-        iotEndpoint,
-        iotParentTopic
+      publishFailed = true
+      process.nextTick(() => cb(new Error('publish failed (test)')))
+    }
+
+    fakeMqttClient.end = (force, cb) => process.nextTick(cb || force)
+
+    const stubDevice = sinon.stub(awsIot, 'device').returns(fakeMqttClient)
+    const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
+      if (/preauth/.test(url)) {
+        if (!authStep1Failed) {
+          authStep1Failed = true
+          throw new Error('auth step 1 failed (test)')
+        }
+
+        return {
+          time: Date.now(),
+          iotEndpoint,
+          iotParentTopic
+        }
       }
+
+      if (!authStep2Failed) {
+        authStep2Failed = true
+        throw new Error('auth step 2 failed (test)')
+      }
+
+      return getDefaultAuthResponse()
+    }))
+
+    if (retryOnSend) {
+      yield client.send(sendFixture)
+    } else {
+      try {
+        yield client.send(sendFixture)
+      } catch (err) {
+        t.ok(/auth step 1/.test(err.message))
+      }
+
+      try {
+        yield client.send(sendFixture)
+      } catch (err) {
+        t.ok(/auth step 2/.test(err.message))
+      }
+
+      try {
+        yield client.send(sendFixture)
+      } catch (err) {
+        t.ok(/subscribe/.test(err.message))
+      }
+
+      try {
+        yield client.send(sendFixture)
+      } catch (err) {
+        t.ok(/publish/.test(err.message))
+      }
+
+      yield client.send(sendFixture)
     }
 
-    if (!authStep2Failed) {
-      authStep2Failed = true
-      throw new Error('auth step 2 failed (test)')
-    }
-
-    return getDefaultAuthResponse()
+    stubDevice.restore()
+    stubPost.restore()
+    t.end()
   }))
-
-  setup({ retryOnSend: false })
-
-  try {
-    yield client.send(sendFixture)
-  } catch (err) {
-    t.ok(/auth step 1/.test(err.message))
-  }
-
-  try {
-    yield client.send(sendFixture)
-  } catch (err) {
-    t.ok(/auth step 2/.test(err.message))
-  }
-
-  try {
-    yield client.send(sendFixture)
-  } catch (err) {
-    t.ok(/subscribe/.test(err.message))
-  }
-
-  try {
-    yield client.send(sendFixture)
-  } catch (err) {
-    t.ok(/publish/.test(err.message))
-  }
-
-  yield client.send(sendFixture)
-
-  setup({ retryOnSend: true })
-  yield client.send(sendFixture)
-
-  stubDevice.restore()
-  stubPost.restore()
-  t.end()
-}))
+})
 
 test('upload', loudCo(function* (t) {
   const node = fakeNode()
@@ -592,12 +586,11 @@ test('upload', loudCo(function* (t) {
   fakeMqttClient.emit('connect')
 
   const url = `https://${bucket}.s3.amazonaws.com/${keyPrefix}a30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b`
-  client._sendMQTT = function ({ message, link }) {
-    const messageObj = message.unserialized.object
-    t.equal(messageObj.object.photo, `${PREFIX.unsigned}${url}`)
+  client._sendMQTT = co(function* ({ message, link }) {
+    t.equal(message.object.photo, `${PREFIX.unsigned}${url}`)
     t.end()
     return Promise.resolve()
-  }
+  })
 
   const stubFetch = sinon
     .stub(utils, 'fetch')

@@ -31,9 +31,11 @@ const {
   extractAndUploadEmbeds,
   wait,
   delayThrow,
-  postMessage,
-  isDeveloperError
+  isDeveloperError,
+  processResponse
 } = utils
+
+const zlib = promisify(require('zlib'))
 
 // const Restore = require('@tradle/restore')
 const debug = require('./debug')
@@ -93,6 +95,7 @@ function Client ({
   this._getSendPosition = getSendPosition
   this._getReceivePosition = getReceivePosition
   this._retryOnSend = retryOnSend
+  this._isLocalServer = /https?:\/\/localhost:/.test(this._endpoint)
   this._reset()
 }
 
@@ -187,7 +190,9 @@ proto._unprefixTopic = function (topic) {
 // }
 
 proto._setPosition = function (position) {
-  if (this._position) throw new Error('position already set')
+  if (this._position) {
+    throw new Error('position already set')
+  }
 
   this._debug('client position:', prettify(position))
   this._position = position
@@ -446,11 +451,6 @@ proto.publish = co(function* ({ topic, payload, qos=1 }) {
 
   topic = this._prefixTopic(topic)
   this._debug(`publishing to topic: "${topic}"`)
-  payload = yield IotMessage.encode({
-    payload,
-    encoding: 'gzip'
-  })
-
   const ret = yield this._client.publish(topic, payload, { qos })
   this._debug(`published to topic: "${topic}"`)
   return ret
@@ -711,15 +711,16 @@ proto._send = co(function* ({ message, link, timeout }) {
     }
   }
 
+  const length = message.length
   const useHttp = !this._client ||
     this._httpOnly ||
-    message.length * 1.34 > MQTT_MAX_MESSAGE_SIZE
+    length * 2 > MQTT_MAX_MESSAGE_SIZE // gzip will cut the size 5-10x
 
   const send = useHttp ? this._sendHTTP : this._sendMQTT
   this._sending = link
   try {
     return yield send({
-      message,
+      message: message.unserialized.object,
       link,
       timeout: {
         error: SEND_TIMEOUT_ERROR,
@@ -729,6 +730,7 @@ proto._send = co(function* ({ message, link, timeout }) {
   } finally {
     if (!useHttp && this._sendMQTTSession) {
       this._sendMQTTSession.destroy()
+      this._sendMQTTSession = null
     }
 
     this._sending = null
@@ -737,7 +739,26 @@ proto._send = co(function* ({ message, link, timeout }) {
 
 proto._sendHTTP = co(function* ({ message, link, timeout }) {
   this._debug('sending over HTTP')
-  yield this._await(postMessage(`${this._endpoint}/${paths.inbox}`, message), timeout)
+  const url = `${this._endpoint}/${paths.inbox}`
+  const headers = {
+    'Accept': 'application/json',
+    'Content-Type': 'application/json'
+  }
+
+  let payload = getPayload(message)
+  if (!this._isLocalServer) {
+    payload = yield this._await(zlib.gzip(stringify(payload)))
+    headers['Content-Encoding'] = 'gzip'
+  }
+
+  const promise = utils.fetch(url, {
+    method: 'POST',
+    headers,
+    body: payload
+  })
+  .then(processResponse)
+
+  yield this._await(promise, timeout)
 })
 
 proto._sendMQTT = co(function* ({ message, link, timeout }) {
@@ -746,6 +767,11 @@ proto._sendMQTT = co(function* ({ message, link, timeout }) {
     this._sendMQTTSession.destroy()
   }
 
+  const payload = yield this._await(IotMessage.encode({
+    payload: getPayload(message),
+    encoding: 'gzip'
+  }))
+
   this._sendMQTTSession = new Ultron(this)
   const promiseAck = new Promise((resolve, reject) => {
     this._debug(`waiting for ack:${link}`)
@@ -753,22 +779,14 @@ proto._sendMQTT = co(function* ({ message, link, timeout }) {
     this._sendMQTTSession.once(`reject:${link}`, reject)
   })
 
-  try {
-    const promisePublish = this.publish({
-      topic: `${this._clientId}/pub/outbox`,
-      // topic: 'message',
-      payload: message
-    })
+  const promisePublish = this.publish({
+    topic: `${this._clientId}/pub/outbox`,
+    // topic: 'message',
+    payload
+  })
 
-    yield this._await(Promise.all([promisePublish, promiseAck]), timeout)
-    this._debug('delivered message!')
-  } finally {
-    this._sending = null
-    this._sendMQTTSession.destroy()
-    this._sendMQTTSession = null
-  }
-
-  // this.emit('sent', message)
+  yield this._await(Promise.all([promisePublish, promiseAck]), timeout)
+  this._debug('delivered message!')
 })
 
 const getAttemptsLeft = (retries) => {
@@ -777,3 +795,5 @@ const getAttemptsLeft = (retries) => {
 
   return 1
 }
+
+const getPayload = message => ({ messages: [message] })

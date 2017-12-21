@@ -197,23 +197,6 @@ const defer = () => {
   return p
 }
 
-const postMessage = co(function* (url, message) {
-  const res = yield utils.fetch(url, {
-    method: 'POST',
-    headers: {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json'
-    },
-    // 1. serverless-offline has poor binary support
-    // 2. 33% overhead from converting to base64
-    body: /^https?:\/\/localhost:/.test(url)
-      ? JSON.stringify({ messages: [message.unserialized.object] })
-      : JSON.stringify({ messages: [message] })
-  })
-
-  return processResponse(res)
-})
-
 const systemErrors = [
   EvalError,
   RangeError,
@@ -258,6 +241,5 @@ const utils = module.exports = {
   wait,
   delayThrow,
   defer,
-  postMessage,
   isDeveloperError
 }
