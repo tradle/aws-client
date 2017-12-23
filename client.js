@@ -745,9 +745,9 @@ proto._sendHTTP = co(function* ({ message, link, timeout }) {
     'Content-Type': 'application/json'
   }
 
-  let payload = getPayload(message)
+  let payload = stringify(getPayload(message))
   if (!this._isLocalServer) {
-    payload = yield this._await(zlib.gzip(stringify(payload)))
+    payload = yield this._await(zlib.gzip(payload))
     headers['Content-Encoding'] = 'gzip'
   }
 
