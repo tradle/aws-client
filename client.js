@@ -495,10 +495,16 @@ proto.handleMessage = co(function* (packet, cb) {
 proto._handleMessage = co(function* (topic, payload) {
   this._debug(`received "${topic}" event`)
   try {
-    payload = yield IotMessage.decode(payload)
+    payload = IotMessage.decodeRaw(payload)
+    const { date } = payload.headers
+    if (typeof date === 'number') {
+      this._debug(`message travel time: ${(Date.now() - date)}, length: ${payload.body.length}`)
+    }
+
+    payload = yield IotMessage.getBody(payload)
     payload = JSON.parse(payload)
   } catch (err) {
-    this._debug(`received non-JSON payload, skipping`, payload)
+    this._debug(`received invalid payload, skipping`, payload)
     return
   }
 
