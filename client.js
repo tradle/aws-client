@@ -51,9 +51,13 @@ const paths = {
 }
 
 const CLOSE_TIMEOUT_ERROR = new Error('close timed out')
-const CLOSE_TIMEOUT = 1000
 const SEND_TIMEOUT_ERROR = new Error('send timed out')
-const SEND_TIMEOUT = 6000
+const CATCH_UP_TIMEOUT_ERROR = new Error('catch-up timed out')
+exports = module.exports = Client
+exports.CLOSE_TIMEOUT = 1000
+exports.SEND_TIMEOUT = 6000
+exports.CATCH_UP_TIMEOUT = 5000
+
 const DEFAULT_ENCODING = 'utf8'
 // const TOPIC_PREFIX = 'tradle-'
 const SUB_TOPICS = ['inbox', 'ack', 'reject']
@@ -96,6 +100,7 @@ function Client ({
   this._getReceivePosition = getReceivePosition
   this._retryOnSend = retryOnSend
   this._isLocalServer = /https?:\/\/localhost:/.test(this._endpoint)
+  this.setMaxListeners(0)
   this._reset()
 }
 
@@ -233,8 +238,28 @@ proto._setCatchUpTarget = function ({ sent, received }) {
   if (!(pos && checkIfCaughtUp([pos]))) {
     this._debug(`waiting for message: ${prettify(sent)}`)
     this._myEvents.on('messages', checkIfCaughtUp)
+    this._watchCatchUp()
   }
 }
+
+proto._watchCatchUp = co(function* () {
+  let error
+  while (!(this._ready || error)) {
+    let madeProgress
+    result = yield Promise.race([
+      wait(exports.CATCH_UP_TIMEOUT),
+      this._promiseListen('messages').then(() => {
+        madeProgress = true
+      }),
+      this._promiseListen('error').then(err => {
+        error = err
+      })
+    ])
+
+    // poke server
+    if (!madeProgress) yield this.announcePosition()
+  }
+})
 
 proto.ready = function () {
   if (this._ready) return RESOLVED
@@ -622,6 +647,7 @@ proto.close = co(function* (force) {
   const client = this._client
   if (!client) return
 
+  const { CLOSE_TIMEOUT } = exports
   if (!force) {
     this._debug('attempting polite close')
     try {
@@ -655,6 +681,21 @@ proto.close = co(function* (force) {
   }
 })
 
+proto.announcePosition = co(function* () {
+  if (!this._position) {
+    yield this._await(this._findPosition())
+  }
+
+  yield this._await(this.publish({
+    topic: `${this._clientId}/pub/outbox`,
+    payload: yield IotMessage.encode({
+      type: 'announcePosition',
+      payload: this._position,
+      encoding: 'identity'
+    })
+  }))
+})
+
 // proto.request = co(function* (restore) {
 //   const { seqs, gt, lt } = restore
 //   return this.publish({
@@ -685,7 +726,7 @@ proto._replaceDataUrls = co(function* (message) {
   return serialized
 })
 
-proto.send = co(function* ({ message, link, timeout=SEND_TIMEOUT }) {
+proto.send = co(function* ({ message, link, timeout=exports.SEND_TIMEOUT }) {
   let attemptsLeft = getAttemptsLeft(this._retryOnSend)
   let err
   while (attemptsLeft-- > 0) {
@@ -802,4 +843,4 @@ const getAttemptsLeft = (retries) => {
   return 1
 }
 
-const getPayload = message => ({ messages: [message] })
+const getPayload = message => [message]
