@@ -3,20 +3,18 @@ const parseUrl = require('url').parse
 const { EventEmitter } = require('events')
 const crypto = require('crypto')
 const util = require('util')
-const pick = require('object.pick')
+const _ = require('lodash')
 const awsIot = require('aws-iot-device-sdk')
 const bindAll = require('bindall')
-const Promise = require('any-promise')
 const Ultron = require('ultron')
 const { TYPE } = require('@tradle/constants')
 const IotMessage = require('@tradle/iot-message')
-const RESOLVED = Promise.resolve()
 const utils = require('./utils')
+const createState = require('./connection-state')
 const {
+  Promise,
+  RESOLVED,
   assert,
-  extend,
-  shallowClone,
-  clone,
   co,
   promisify,
   genClientId,
@@ -53,10 +51,12 @@ const paths = {
 const CLOSE_TIMEOUT_ERROR = new Error('close timed out')
 const SEND_TIMEOUT_ERROR = new Error('send timed out')
 const CATCH_UP_TIMEOUT_ERROR = new Error('catch-up timed out')
+const CONNECT_TIMEOUT_ERROR = new Error('connect timed out')
 exports = module.exports = Client
 exports.CLOSE_TIMEOUT = 1000
 exports.SEND_TIMEOUT = 6000
 exports.CATCH_UP_TIMEOUT = 5000
+exports.CONNECT_TIMEOUT = 5000
 
 const DEFAULT_ENCODING = 'utf8'
 // const TOPIC_PREFIX = 'tradle-'
@@ -140,6 +140,11 @@ proto._await = co(function* (promise, timeout) {
 
   try {
     return yield Promise.race(race)
+  } catch (err) {
+    if (isDeveloperError(err)) {
+      console.error('DEVELOPER ERROR', err.stack)
+      throw err
+    }
   } finally {
     errorWatch.destroy()
     if (timeout) {
@@ -160,7 +165,7 @@ proto._maybeStart = function () {
   if (!(this._node && this._position)) return
 
   this._auth().catch(err => {
-    this._authenticating = false
+    // this._authenticating = false
     this._debug('auth failed')
     this.emit('error', err)
   })
@@ -211,9 +216,8 @@ proto._setPosition = function (position) {
 proto._setCatchUpTarget = function ({ sent, received }) {
   const onCaughtUp = () => {
     this._debug('all caught up!')
-    this._ready = true
+    this._state.caughtUp = true
     this.removeListener('messages', checkIfCaughtUp)
-    this.emit('ready')
   }
 
   const checkIfCaughtUp = messages => {
@@ -244,9 +248,9 @@ proto._setCatchUpTarget = function ({ sent, received }) {
 
 proto._watchCatchUp = co(function* () {
   let error
-  while (!(this._ready || error)) {
+  while (!(this._state.canSend || error)) {
     let madeProgress
-    result = yield Promise.race([
+    let result = yield Promise.race([
       wait(exports.CATCH_UP_TIMEOUT),
       this._promiseListen('messages').then(() => {
         madeProgress = true
@@ -261,11 +265,17 @@ proto._watchCatchUp = co(function* () {
   }
 })
 
-proto.ready = function () {
-  if (this._ready) return RESOLVED
+proto.ready = co(function* () {
+  const state = this._state
+  yield this._await(this._state.await({
+    canSend: true
+  }))
 
-  return this._promiseListen('ready')
-}
+  if (state !== this._state) {
+    // we just experienced an error and reset
+    return this.ready()
+  }
+})
 
 proto._authStep1 = co(function* () {
   this._step1Result = yield utils.post(`${this._endpoint}/${paths.preauth}`, {
@@ -365,7 +375,8 @@ proto._auth = co(function* () {
   yield this._authStep2()
 
   this._debug('authenticated')
-  this._authenticated = true
+  this._state.authenticated = true
+  // this._authenticated = true
   this.emit('authenticated')
 
   if (!iotEndpoint) {
@@ -424,7 +435,7 @@ proto.reset = function reset () {
 
 proto._reset = co(function* (opts={}) {
   const { position, delay } = opts
-  this._ready = false
+  this._state = createState()
   this._serverAheadMillis = 0
   this._sending = null
   this._position = null
@@ -439,6 +450,13 @@ proto._reset = co(function* (opts={}) {
       delay: RETRY_DELAY_AFTER_ERROR
     })
   })
+
+  this._myEvents.on('disconnect', co(function* () {
+    yield this._await(this._state.await({ connected: true }), {
+      error: CONNECT_TIMEOUT_ERROR,
+      delay: exports.CONNECT_TIMEOUT
+    })
+  }))
 
   const client = this._client
   if (client) {
@@ -470,21 +488,13 @@ proto._reset = co(function* (opts={}) {
 })
 
 proto.publish = co(function* ({ topic, payload, qos=1 }) {
-  if (!this._subscribed) {
-    yield this._await(this._promiseListen('subscribed'))
-  }
-
+  yield this._await(this._state.await({ canPublish: true }))
   topic = this._prefixTopic(topic)
   this._debug(`publishing to topic: "${topic}"`)
   const ret = yield this._client.publish(topic, payload, { qos })
   this._debug(`published to topic: "${topic}"`)
   return ret
 })
-
-proto._onconnect = function () {
-  this._debug('connected')
-  this.emit('connect')
-}
 
 proto._subscribe = co(function* () {
   const topic = this._prefixTopic(`${this._clientId}/sub/+`)
@@ -498,7 +508,7 @@ proto._subscribe = co(function* () {
   }
 
   this._debug('subscribed')
-  this._subscribed = true
+  this._state.subscribed = true
   this.emit('subscribed')
 })
 
@@ -628,18 +638,27 @@ proto._processMessage = co(function* (message) {
 //   }
 // })
 
-proto._onoffline = function () {
-  this.emit('offline')
-  this._debug('offline')
+proto._onconnect = function () {
+  this._debug('connected')
+  this._state.connected = true
+  this.emit('connect')
 }
 
 proto._onreconnect = function () {
   this.emit('reconnect')
+  this._state.connected = true
   this._debug('reconnected')
+}
+
+proto._onoffline = function () {
+  this.emit('offline')
+  this._state.connected = false
+  this._debug('offline')
 }
 
 proto._onclose = function () {
   this.emit('disconnect')
+  this._state.connected = false
   this._debug('disconnected')
 }
 
@@ -706,10 +725,10 @@ proto.announcePosition = co(function* () {
 
 proto._replaceDataUrls = co(function* (message) {
   const copy = Buffer.isBuffer(message)
-    ? clone(message.unserialized.object)
-    : clone(message)
+    ? _.cloneDeep(message.unserialized.object)
+    : _.cloneDeep(message)
 
-  const changed = yield extractAndUploadEmbeds(extend({
+  const changed = yield extractAndUploadEmbeds(_.extend({
     object: copy,
     region: this._region,
     endpoint: this._s3Endpoint,
@@ -719,7 +738,7 @@ proto._replaceDataUrls = co(function* (message) {
   if (!changed) return message
 
   const serialized = utils.serializeMessage(copy)
-  serialized.unserialized = shallowClone(message.unserialized || {}, {
+  serialized.unserialized = _.extend({}, message.unserialized || {}, {
     object: copy
   })
 
@@ -836,7 +855,7 @@ proto._sendMQTT = co(function* ({ message, link, timeout }) {
   this._debug('delivered message!')
 })
 
-const getAttemptsLeft = (retries) => {
+const getAttemptsLeft = retries => {
   if (typeof retries === 'number') return retries
   if (retries === true) return Infinity
 

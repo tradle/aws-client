@@ -1,11 +1,10 @@
+const Promise = require('bluebird')
 const { AssertionError } = require('assert')
 const crypto = require('crypto')
-const extend = require('xtend/mutable')
-const shallowClone = require('xtend')
+const _ = require('lodash')
 const fetch = require('isomorphic-fetch')
-const clone = require('clone')
 const stringify = JSON.stringify.bind(JSON)
-const co = Promise.coroutine || require('co').wrap
+const co = require('co').wrap
 const promisify = require('pify')
 const { AwsSigner } = require('aws-sign-web')
 // const minio = require('minio')
@@ -16,6 +15,8 @@ const {
   decodeDataURI,
   encodeDataURI
 } = require('@tradle/embed')
+
+const RESOLVED = Promise.resolve()
 
 const post = co(function* (url, data) {
   const res = yield utils.fetch(url, {
@@ -124,7 +125,7 @@ const uploadToS3 = co(function* ({
   host,
   s3Url
 }) {
-  const signer = new AwsSigner(extend({
+  const signer = new AwsSigner(_.extend({
     service: 's3',
     region,
   }, credentials))
@@ -181,16 +182,16 @@ const delayThrow = ({ error, delay }) => {
   return promise
 }
 
-const wait = (millis) => {
+const wait = millis => {
   return new Promise(resolve => setTimeout(resolve, millis))
 }
 
 const defer = () => {
   let _resolve
   let _reject
-  let p = new Promise((resolve, reject) => (
-    [_resolve, _reject] = [resolve, reject])
-  )
+  let p = new Promise((resolve, reject) => {
+    [_resolve, _reject] = [resolve, reject]
+  })
 
   p.resolve = _resolve
   p.reject = _reject
@@ -213,10 +214,15 @@ const isDeveloperError = err => {
   })
 }
 
+const defineGetter = (obj, prop, getter) => {
+  Object.defineProperty(obj, prop, {
+    get: getter
+  })
+}
+
 const utils = module.exports = {
-  extend,
-  shallowClone,
-  clone,
+  Promise,
+  RESOLVED,
   co,
   promisify,
   post,
@@ -241,5 +247,6 @@ const utils = module.exports = {
   wait,
   delayThrow,
   defer,
-  isDeveloperError
+  isDeveloperError,
+  defineGetter
 }

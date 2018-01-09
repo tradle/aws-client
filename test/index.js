@@ -1,8 +1,8 @@
 const nock = require('nock')
 const zlib = require('zlib')
 const { EventEmitter } = require('events')
+const _ = require('lodash')
 const test = require('tape')
-const clone = require('xtend')
 const co = require('co').wrap
 const awsIot = require('aws-iot-device-sdk')
 const sinon = require('sinon')
@@ -12,7 +12,7 @@ const { PREFIX } = require('@tradle/embed')
 const IotMessage = require('@tradle/iot-message')
 const utils = require('../utils')
 const {
-  extend,
+  Promise,
   post,
   genClientId,
   replaceDataUrls,
@@ -125,13 +125,13 @@ test.skip('upload to s3', loudCo(function* (t) {
 
   // console.log(JSON.stringify(credentials, null, 2))
 
-  const dataUrls = replaceDataUrls(extend({
+  const dataUrls = replaceDataUrls(_.extend({
     object: {
       blah: 'data:image/jpeg;base64,/8j/4AAQSkZJRgABAQAAAQABAAD'
     }
   }, parsePrefix(uploadPrefix)))
 
-  console.log(JSON.stringify(extend({
+  console.log(JSON.stringify(_.extend({
     bucket: dataUrls[0].bucket,
     key: dataUrls[0].key,
     body: dataUrls[0].body.toString('base64')
@@ -145,7 +145,7 @@ test.skip('upload to s3', loudCo(function* (t) {
   //   })
   //   .reply(200)
 
-  yield uploadToS3(extend(dataUrls[0], { credentials }))
+  yield uploadToS3(_.extend(dataUrls[0], { credentials }))
   t.end()
 }))
 
@@ -183,7 +183,7 @@ test('init, auth', loudCo(function* (t) {
     return 0
   }))
 
-  const stubPost = sinon.stub(utils, 'post').callsFake(function (url, data) {
+  const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
     if (step++ === 0) {
       t.equal(data.clientId, clientId)
       t.equal(data.identity, identity)
@@ -194,7 +194,7 @@ test('init, auth', loudCo(function* (t) {
     t.equal(step, 2)
     t.equal(url, `${endpoint}/auth`)
     return authResp
-  })
+  }))
 
   const clientId = permalink.repeat(2)
   const client = new Client({
@@ -236,7 +236,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
       }
     }
 
-    return extend(getDefaultAuthResponse(), {
+    return _.extend(getDefaultAuthResponse(), {
       position: serverPos,
     })
   }))
@@ -248,7 +248,6 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
   const stubDevice = sinon.stub(awsIot, 'device').returns(fakeMqttClient)
   fakeMqttClient.publish = co(function* (topic, payload, opts, cb) {
-    debugger
     t.equal(subscribed, true)
     t.equal(published, false)
     published = true
@@ -303,7 +302,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
     object: {}
   }
 
-  const client = new Client(extend({
+  const client = new Client(_.extend({
     endpoint,
     clientId,
     node
@@ -313,7 +312,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
     throw err
   })
 
-  const expected = clone(serverSentMessage)
+  const expected = _.clone(serverSentMessage)
   expected.recipientPubKey.pub = new Buffer(expected.recipientPubKey.pub.data)
   client.onmessage = function (message) {
     t.same(message, expected)
@@ -321,6 +320,10 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
   client.on('messages', function (messages) {
     t.same(messages, [expected])
+  })
+
+  client.on('authenticated', () => {
+    process.nextTick(() => fakeMqttClient.emit('connect'))
   })
 
   // should wait till it's caught up to server position
@@ -363,9 +366,6 @@ test('catch up with server position before sending', loudCo(function* (t) {
   })
 
   yield client.ready()
-
-  fakeMqttClient.emit('connect')
-
   yield promiseSend
 
   t.equal(delivered, true)
@@ -400,6 +400,10 @@ test('reset on error', loudCo(function* (t) {
   }))
 
   const fakeMqttClient = new EventEmitter()
+  fakeMqttClient.subscribe = function (topics, opts, cb) {
+    process.nextTick(cb)
+  }
+
   fakeMqttClient.end = function (force, cb) {
     if (force !== true) {
       triedClose = true
@@ -423,6 +427,10 @@ test('reset on error', loudCo(function* (t) {
     node,
     getSendPosition: () => Promise.resolve(null),
     getReceivePosition: () => Promise.resolve(null),
+  })
+
+  client.on('authenticated', () => {
+    process.nextTick(() => fakeMqttClient.emit('connect'))
   })
 
   yield client.ready()
@@ -462,9 +470,7 @@ test('reset on error', loudCo(function* (t) {
     })
 
     client.on('authenticated', () => {
-      process.nextTick(() => {
-        fakeMqttClient.emit('connect')
-      })
+      process.nextTick(() => fakeMqttClient.emit('connect'))
     })
 
     const fakeMqttClient = new EventEmitter()
@@ -537,11 +543,12 @@ test('reset on error', loudCo(function* (t) {
         t.ok(/auth step 2/.test(err.message))
       }
 
-      try {
-        yield client.send(sendFixture)
-      } catch (err) {
-        t.ok(/subscribe/.test(err.message))
-      }
+      // commented out because "subscribed" is not a prereq to sending
+      // try {
+      //   yield client.send(sendFixture)
+      // } catch (err) {
+      //   t.ok(/subscribe/.test(err.message))
+      // }
 
       try {
         yield client.send(sendFixture)
@@ -579,7 +586,7 @@ test('upload', loudCo(function* (t) {
       }
     }
 
-    return extend(getDefaultAuthResponse(), {
+    return _.extend(getDefaultAuthResponse(), {
       uploadPrefix: `${bucket}/${keyPrefix}`
     })
   }))
@@ -599,8 +606,11 @@ test('upload', loudCo(function* (t) {
     getReceivePosition: () => Promise.resolve(null),
   })
 
+  client.on('authenticated', () => {
+    process.nextTick(() => fakeMqttClient.emit('connect'))
+  })
+
   yield client.ready()
-  fakeMqttClient.emit('connect')
 
   const url = `https://${bucket}.s3.amazonaws.com/${keyPrefix}a30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b`
   client._sendMQTT = co(function* ({ message, link }) {
@@ -660,7 +670,7 @@ function fakeNode () {
     permalink: 'a'.repeat(32),
     identity: {},
     sign: obj => {
-      return Promise.resolve(clone(obj, {
+      return Promise.resolve(_.clone(obj, {
         _s: 'somesig'
       }))
     }
@@ -692,7 +702,7 @@ function hang () {
 function toArrayBuffer (buf) {
   const ab = new ArrayBuffer(buf.length)
   const view = new Uint8Array(ab)
-  for (var i = 0; i < buf.length; ++i) {
+  for (let i = 0; i < buf.length; ++i) {
     view[i] = buf[i]
   }
 
@@ -719,7 +729,7 @@ function getCredentials () {
 }
 
 function getDefaultAuthResponse () {
-  return extend(getCredentials(), {
+  return _.extend(getCredentials(), {
     time: Date.now(),
     position: {
       sent: null,
