@@ -645,9 +645,7 @@ proto._onconnect = function () {
 }
 
 proto._onreconnect = function () {
-  this.emit('reconnect')
-  this._state.connected = true
-  this._debug('reconnected')
+  this._debug('reconnecting...')
 }
 
 proto._onoffline = function () {
