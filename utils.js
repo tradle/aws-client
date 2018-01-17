@@ -1,3 +1,5 @@
+const parseURL = require('url').parse
+const IP = require('ip')
 const Promise = require('bluebird')
 const { AssertionError } = require('assert')
 const crypto = require('crypto')
@@ -220,6 +222,19 @@ const defineGetter = (obj, prop, getter) => {
   })
 }
 
+const isLocalUrl = url => {
+  const { hostname } = parseURL(url)
+  return isLocalHost(hostname)
+}
+
+const isLocalHost = host => {
+  host = host.split(':')[0]
+  if (host === 'localhost') return true
+
+  const isIP = IP.isV4Format(host) || IP.isV6Format(host)
+  return isIP && IP.isPrivate(host)
+}
+
 const utils = module.exports = {
   Promise,
   RESOLVED,
@@ -248,5 +263,7 @@ const utils = module.exports = {
   delayThrow,
   defer,
   isDeveloperError,
-  defineGetter
+  defineGetter,
+  isLocalHost,
+  isLocalUrl
 }

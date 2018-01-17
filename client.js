@@ -30,7 +30,9 @@ const {
   wait,
   delayThrow,
   isDeveloperError,
-  processResponse
+  processResponse,
+  isLocalUrl,
+  isLocalHost
 } = utils
 
 const zlib = promisify(require('zlib'))
@@ -99,7 +101,7 @@ function Client ({
   this._getSendPosition = getSendPosition
   this._getReceivePosition = getReceivePosition
   this._retryOnSend = retryOnSend
-  this._isLocalServer = /https?:\/\/localhost:/.test(this._endpoint)
+  this._isLocalServer = isLocalUrl(this._endpoint)
   this.setMaxListeners(0)
   this._reset()
 }
@@ -387,7 +389,7 @@ proto._auth = co(function* () {
   const [host, port] = iotEndpoint.split(':')
   const client = awsIot.device({
     region,
-    protocol: iotEndpoint.startsWith('localhost:') ? 'ws' : 'wss',
+    protocol: isLocalHost(iotEndpoint) ? 'ws' : 'wss',
     accessKeyId: this._credentials.accessKeyId,
     secretKey: this._credentials.secretAccessKey,
     sessionToken: this._credentials.sessionToken,
