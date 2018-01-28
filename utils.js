@@ -19,22 +19,41 @@ const {
 } = require('@tradle/embed')
 
 const RESOLVED = Promise.resolve()
+const FETCH_TIMED_OUT = new Error('fetch timed out')
 
-const post = co(function* (url, data) {
-  const res = yield utils.fetch(url, {
+const wrappedFetch = co(function* (url, opts={}) {
+  const { timeout } = opts
+  if (!timeout) return yield utils._fetch(url, opts)
+
+  const timeBomb = delayThrow({
+    error: new Error(`fetch timed out after: ${timeout}ms`),
+    delay: timeout
+  })
+
+  const result = yield Promise.race([
+    timeBomb,
+    utils._fetch(url, _.omit(opts, 'timeout'))
+  ])
+
+  timeBomb.cancel()
+  return result
+})
+
+const post = co(function* (url, data, opts={}) {
+  const res = yield utils.fetch(url, _.extend({
     method: 'POST',
     headers: {
       'Accept': 'application/json',
       'Content-Type': 'application/json'
     },
     body: stringify(data)
-  })
+  }, opts))
 
   return processResponse(res)
 })
 
 const processResponse = co(function* (res) {
-  if (res.status > 300) {
+  if (!res.ok || res.status > 300) {
     throw new Error(res.statusText)
   }
 
@@ -255,7 +274,8 @@ const utils = module.exports = {
   uploadToS3,
   extractAndUploadEmbeds,
   parsePrefix,
-  fetch,
+  _fetch: fetch,
+  fetch: wrappedFetch,
   encodeDataURI,
   decodeDataURI,
   assert,

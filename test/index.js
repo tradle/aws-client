@@ -63,6 +63,35 @@ const sendFixture = {
   link: messageLink
 }
 
+test('fetch with timeout', loudCo(function* (t) {
+  const clock = sinon.useFakeTimers()
+  const fetchStub = sinon.stub(utils, '_fetch').callsFake(co(function* () {
+    clock.tick(100)
+    return {
+      ok: true,
+      status: 200
+    }
+  }))
+
+  try {
+    yield utils.fetch('http://abc.123', { timeout: 50 })
+    t.fail('expected timeout')
+  } catch (err) {
+    t.ok(/timed out/.test(err.message), 'fetch aborted after timeout')
+  }
+
+  const uncaughtRejectionHandler = t.fail
+  process.on('uncaughtRejection', uncaughtRejectionHandler)
+  yield utils.fetch('http://abc.123', { timeout: 200 })
+  clock.tick(200)
+  process.removeListener('uncaughtRejection', uncaughtRejectionHandler)
+  t.pass('timer canceled')
+
+  fetchStub.restore()
+  clock.restore()
+  t.end()
+}))
+
 test('resolve embeds', loudCo(function* (t) {
   const s3Url = 'https://mybucket.s3.amazonaws.com/mykey'
   const object = {
@@ -630,6 +659,7 @@ test('upload', loudCo(function* (t) {
       }
 
       const res = {
+        ok: true,
         status: 200,
         headers: {
           get: name => headers[name]

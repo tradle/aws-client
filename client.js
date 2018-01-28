@@ -42,6 +42,7 @@ const debug = require('./debug')
 const DATA_URL_REGEX = /data:.+\/.+;base64,.*/g
 const TESTING = process.env.NODE_ENV === 'test'
 const RETRY_DELAY_AFTER_ERROR = TESTING ? 100 : 5000
+const AUTH_FETCH_OPTS = { timeout: 5000 }
 
 // const EMBEDDED_DATA_URL_REGEX = /\"data:[^/]+\/[^;]+;base64,[^"]*\"/g
 const paths = {
@@ -282,8 +283,8 @@ proto.ready = co(function* () {
 proto._authStep1 = co(function* () {
   this._step1Result = yield utils.post(`${this._endpoint}/${paths.preauth}`, {
     clientId: this._clientId,
-    identity: this._node.identity
-  })
+    identity: this._node.identity,
+  }, AUTH_FETCH_OPTS)
 
   this._postProcessAuthResponse(this._step1Result)
   return this._step1Result
@@ -323,7 +324,7 @@ proto._authStep2 = co(function* () {
 
   this._debug('sending challenge response')
   try {
-    this._step2Result = yield utils.post(`${this._endpoint}/${paths.auth}`, signed.object)
+    this._step2Result = yield utils.post(`${this._endpoint}/${paths.auth}`, signed.object, AUTH_FETCH_OPTS)
   } catch (err) {
     if (/timed\s+out/i.test(err.message)) return this._auth()
 
