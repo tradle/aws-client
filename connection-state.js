@@ -5,6 +5,7 @@ const {
 
 module.exports = function createConnectionState () {
   const state = createState({
+    resetting: false,
     authenticated: false,
     connected: false,
     subscribed: false,

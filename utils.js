@@ -21,9 +21,17 @@ const {
 const RESOLVED = Promise.resolve()
 const FETCH_TIMED_OUT = new Error('fetch timed out')
 
+const redirectTypeErrors = err => {
+  if (err instanceof TypeError) {
+    throw new Error(err.message)
+  }
+
+  throw err
+}
+
 const wrappedFetch = co(function* (url, opts={}) {
   const { timeout } = opts
-  if (!timeout) return yield utils._fetch(url, opts)
+  if (!timeout) return yield utils._fetch(url, opts).catch(redirectTypeErrors)
 
   const timeBomb = delayThrow({
     error: new Error(`fetch timed out after: ${timeout}ms`),
@@ -32,7 +40,7 @@ const wrappedFetch = co(function* (url, opts={}) {
 
   const result = yield Promise.race([
     timeBomb,
-    utils._fetch(url, _.omit(opts, 'timeout'))
+    utils._fetch(url, _.omit(opts, 'timeout')).catch(redirectTypeErrors)
   ])
 
   timeBomb.cancel()

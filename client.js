@@ -424,7 +424,9 @@ proto._auth = co(function* () {
   this._clientEvents.on('offline', this._onoffline)
   this._clientEvents.on('close', this._onclose)
   this._clientEvents.once('error', err => {
-    this.emit('error', err)
+    if (!this._state.resetting) {
+      this.emit('error', err)
+    }
   })
 })
 
@@ -439,6 +441,7 @@ proto.reset = function reset () {
 proto._reset = co(function* (opts={}) {
   const { position, delay } = opts
   this._state = createState()
+  this._state.resetting = true
   this._serverAheadMillis = 0
   this._sending = null
   this._position = null
@@ -469,15 +472,10 @@ proto._reset = co(function* (opts={}) {
       cb(new Error('resetting'))
     }
 
-    if (this._clientEvents) {
-      this._clientEvents.remove()
-      this._clientEvents = null
-    }
-
     yield this.close(true)
-    this._client = null
   }
 
+  this._state.resetting = false
   if (delay) {
     this._debug(`waiting ${delay} before next attempt`)
     yield wait(delay)
@@ -667,7 +665,18 @@ proto.close = co(function* (force) {
   const client = this._client
   if (!client) return
 
+  yield this._close(force)
+  if (this._clientEvents) {
+    this._clientEvents.remove()
+    this._clientEvents = null
+  }
+
+  this._client = null
+})
+
+proto._close = co(function* (force) {
   const { CLOSE_TIMEOUT } = exports
+  const client = this._client
   if (!force) {
     this._debug('attempting polite close')
     try {
