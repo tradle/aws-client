@@ -38,6 +38,7 @@
     "isomorphic-fetch": "^2.2.1",
     "lodash": "^4.17.4",
     "pify": "^3.0.0",
+    "rn-fetch": "^1.0.0",
     "strong-data-uri": "^1.0.4",
     "ultron": "^1.1.0",
     "xtend": "^4.0.1"
