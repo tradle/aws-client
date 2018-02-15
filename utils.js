@@ -18,6 +18,8 @@ const {
   encodeDataURI
 } = require('@tradle/embed')
 
+const fetchImpl = require('./fetch')
+
 const RESOLVED = Promise.resolve()
 const FETCH_TIMED_OUT = new Error('fetch timed out')
 
@@ -282,7 +284,7 @@ const utils = module.exports = {
   uploadToS3,
   extractAndUploadEmbeds,
   parsePrefix,
-  _fetch: fetch,
+  _fetch: fetchImpl,
   fetch: wrappedFetch,
   encodeDataURI,
   decodeDataURI,

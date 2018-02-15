@@ -41,5 +41,8 @@
     "strong-data-uri": "^1.0.4",
     "ultron": "^1.1.0",
     "xtend": "^4.0.1"
+  },
+  "react-native": {
+    "./fetch.js": "rn-fetch"
   }
 }
