@@ -1,6 +1,6 @@
 {
   "name": "@tradle/aws-client",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "main": "index.js",
   "repository": "https://github.com/tradle/aws-client",
   "author": "Mark Vayngrib <mark@tradle.io>",
