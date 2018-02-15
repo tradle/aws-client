@@ -44,6 +44,6 @@
     "xtend": "^4.0.1"
   },
   "react-native": {
-    "./fetch.js": "rn-fetch"
+    "./fetch.js": "./rn-fetch.js"
   }
 }
