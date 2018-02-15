@@ -196,7 +196,9 @@ const download = co(function* ({ url }) {
   return buf
 })
 
-const resolveS3Urls = object => resolveEmbeds({ object, resolve: download })
+const resolveS3Urls = (object, concurrency=10) => {
+  return resolveEmbeds({ object, resolve: download, concurrency })
+}
 
 const assert = (statement, errMsg) => {
   if (!statement) throw new Error(errMsg || 'assertion failed')

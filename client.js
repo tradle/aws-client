@@ -79,7 +79,8 @@ function Client ({
   encoding=DEFAULT_ENCODING,
   counterparty,
   httpOnly,
-  retryOnSend=true
+  retryOnSend=true,
+  maxRequestConcurrency=10
 }) {
   EventEmitter.call(this)
   bindAll(this)
@@ -99,6 +100,7 @@ function Client ({
   this._node = node
   this._counterparty = counterparty
   this._httpOnly = httpOnly
+  this._maxRequestConcurrency = maxRequestConcurrency
   this._getSendPosition = getSendPosition
   this._getReceivePosition = getReceivePosition
   this._retryOnSend = retryOnSend
@@ -611,7 +613,7 @@ proto._processMessage = co(function* (message) {
     recipientPubKey.pub = new Buffer(pub.data)
   }
 
-  yield resolveEmbeds(message)
+  yield resolveEmbeds(message, this._maxRequestConcurrency)
   const maybePromise = this.onmessage(message)
   if (isPromise(maybePromise)) yield maybePromise
 
