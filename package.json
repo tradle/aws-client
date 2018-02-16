@@ -25,7 +25,7 @@
   },
   "dependencies": {
     "@tradle/constants": "^2.1.0",
-    "@tradle/embed": "github:tradle/embed",
+    "@tradle/embed": "^1.0.0",
     "@tradle/iot-message": "^3.0.0",
     "aws-iot-device-sdk": "mvayngrib/aws-iot-device-sdk-js",
     "aws-sign-web": "github:mvayngrib/aws-sign-web",
