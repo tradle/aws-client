@@ -231,22 +231,6 @@ const defer = () => {
   return p
 }
 
-const systemErrors = [
-  EvalError,
-  RangeError,
-  ReferenceError,
-  SyntaxError,
-  TypeError,
-  URIError,
-  AssertionError
-]
-
-const isDeveloperError = err => {
-  return systemErrors.some(ErrCl => {
-    return err instanceof ErrCl
-  })
-}
-
 const defineGetter = (obj, prop, getter) => {
   Object.defineProperty(obj, prop, {
     get: getter
@@ -294,7 +278,6 @@ const utils = module.exports = {
   wait,
   delayThrow,
   defer,
-  isDeveloperError,
   defineGetter,
   isLocalHost,
   isLocalUrl

@@ -482,10 +482,13 @@ test('reset on error', loudCo(function* (t) {
   test(`retryOnSend (${retryOnSend})`, loudCo(function* (t) {
     const node = fakeNode()
     const { permalink, identity } = node
+    const bucket = 'mybucket'
+    const keyPrefix = 'mykeyprefix'
 
     let authStep1Failed
     let authStep2Failed
     let subscribeFailed
+    let replaceEmbedsFailed
     let publishFailed
 
     const clientId = permalink.repeat(2)
@@ -554,23 +557,34 @@ test('reset on error', loudCo(function* (t) {
         throw new Error('auth step 2 failed (test)')
       }
 
-      return getDefaultAuthResponse()
+      return _.extend(getDefaultAuthResponse(), {
+        uploadPrefix: `${bucket}/${keyPrefix}`
+      })
+    }))
+
+    const stubReplaceEmbeds = sinon.stub(client, '_replaceDataUrls').callsFake(co(function* (message) {
+      if (!replaceEmbedsFailed) {
+        replaceEmbedsFailed = true
+        throw new Error('replace embeds failed (test)')
+      }
+
+      return message
     }))
 
     if (retryOnSend) {
       yield client.send(sendFixture)
     } else {
-      try {
-        yield client.send(sendFixture)
-      } catch (err) {
-        t.ok(/auth step 1/.test(err.message))
-      }
+      // try {
+      //   yield client.send(sendFixture)
+      // } catch (err) {
+      //   t.ok(/auth step 1/.test(err.message))
+      // }
 
-      try {
-        yield client.send(sendFixture)
-      } catch (err) {
-        t.ok(/auth step 2/.test(err.message))
-      }
+      // try {
+      //   yield client.send(sendFixture)
+      // } catch (err) {
+      //   t.ok(/auth step 2/.test(err.message))
+      // }
 
       // commented out because "subscribed" is not a prereq to sending
       // try {
@@ -578,6 +592,13 @@ test('reset on error', loudCo(function* (t) {
       // } catch (err) {
       //   t.ok(/subscribe/.test(err.message))
       // }
+
+      try {
+        yield client.send(sendFixture)
+      } catch (err) {
+        console.log(err.stack)
+        t.ok(/replace embeds/.test(err.message))
+      }
 
       try {
         yield client.send(sendFixture)

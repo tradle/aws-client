@@ -9,6 +9,7 @@ const bindAll = require('bindall')
 const Ultron = require('ultron')
 const { TYPE } = require('@tradle/constants')
 const IotMessage = require('@tradle/iot-message')
+const Errors = require('@tradle/errors')
 const utils = require('./utils')
 const createState = require('./connection-state')
 const {
@@ -29,7 +30,6 @@ const {
   extractAndUploadEmbeds,
   wait,
   delayThrow,
-  isDeveloperError,
   processResponse,
   isLocalUrl,
   isLocalHost
@@ -127,16 +127,22 @@ proto._findPosition = co(function* () {
 })
 
 /**
- * wait for the promise to resolve
- * reject if an error is emitted on this instance
- * optionally timeout
+ * wait for "promise" to resolve. Fail if either:
+ * - an error is emitted on this instance
+ * - reject on timeout (optional)
+ * @param {Promise} [promise] task to wait for
+ * @param {Object} opts
+ * @param {Object} opts.timeout
+ * @param {Boolean} opts.ignoreErrors if true, this will resolve even on error
+ * @param {Boolean} opts.emitErrors if true, this will emit the error as an event rather than rejecting
  */
-proto._await = co(function* (promise, timeout) {
+proto._await = co(function* (promise, opts={}) {
+  const { ignoreErrors, emitErrors, timeout } = opts
   const errorWatch = new Ultron(this)
-  const awaitError = new Promise((resolve, reject) => errorWatch.once('error', reject))
+  const rejectOnError = new Promise((resolve, reject) => errorWatch.once('error', reject))
   const race = [
     promise,
-    awaitError
+    rejectOnError
   ]
 
   if (timeout) {
@@ -146,8 +152,13 @@ proto._await = co(function* (promise, timeout) {
   try {
     return yield Promise.race(race)
   } catch (err) {
-    if (isDeveloperError(err)) {
-      console.error('DEVELOPER ERROR', err.stack)
+    if (rejectOnError.isRejected()) {
+      if (!ignoreErrors) throw err
+    }
+
+    if (emitErrors) {
+      this.emit('error', err)
+    } else if (!ignoreErrors) {
       throw err
     }
   } finally {
@@ -257,12 +268,10 @@ proto._watchCatchUp = co(function* () {
     let madeProgress
     let result = yield Promise.race([
       wait(exports.CATCH_UP_TIMEOUT),
-      this._promiseListen('messages').then(() => {
-        madeProgress = true
-      }),
-      this._promiseListen('error').then(err => {
-        error = err
-      })
+      this._promiseListen('messages').then(
+        () => madeProgress = true,
+        err => error = err
+      )
     ])
 
     // poke server
@@ -271,15 +280,17 @@ proto._watchCatchUp = co(function* () {
 })
 
 proto.ready = co(function* () {
-  const state = this._state
-  yield this._await(this._state.await({
-    canSend: true
-  }))
+  yield this._loopUntilStateIs({ canSend: true })
+})
 
-  if (state !== this._state) {
-    // we just experienced an error and reset
-    return this.ready()
-  }
+proto._loopUntilStateIs = co(function* (desiredState) {
+  const statePromise = this._state.await(desiredState)
+  yield this._await(statePromise, { ignoreErrors: true })
+  if (this._state.is(desiredState)) return
+
+  // we prob experienced an error and reset
+  // let's try again...
+  yield this._loopUntilStateIs(desiredState)
 })
 
 proto._authStep1 = co(function* () {
@@ -460,11 +471,17 @@ proto._reset = co(function* (opts={}) {
   })
 
   this._myEvents.on('disconnect', co(function* () {
-    yield this._await(this._state.await({ connected: true }), {
-      error: CONNECT_TIMEOUT_ERROR,
-      delay: exports.CONNECT_TIMEOUT
+    const statePromise = this._state.await({ connected: true })
+    // if we can't reconnect for a while,
+    // emit error to trigger reset()
+    yield this._await(statePromise, {
+      emitErrors: true,
+      timeout: {
+        error: CONNECT_TIMEOUT_ERROR,
+        delay: exports.CONNECT_TIMEOUT
+      }
     })
-  }))
+  }).bind(this))
 
   const client = this._client
   if (client) {
@@ -683,8 +700,10 @@ proto._close = co(function* (force) {
     this._debug('attempting polite close')
     try {
       yield this._await(client.end(), {
-        error: CLOSE_TIMEOUT_ERROR,
-        delay: CLOSE_TIMEOUT
+        timeout: {
+          error: CLOSE_TIMEOUT_ERROR,
+          delay: CLOSE_TIMEOUT
+        }
       })
 
       return
@@ -700,8 +719,10 @@ proto._close = co(function* (force) {
   try {
     this._debug('forcing close')
     yield this._await(client.end(true), {
-      error: CLOSE_TIMEOUT_ERROR,
-      delay: CLOSE_TIMEOUT
+      timeout: {
+        error: CLOSE_TIMEOUT_ERROR,
+        delay: CLOSE_TIMEOUT
+      }
     })
   } catch (err2) {
     if (err2 === CLOSE_TIMEOUT_ERROR) {
@@ -760,17 +781,18 @@ proto._replaceDataUrls = co(function* (message) {
 proto.send = co(function* ({ message, link, timeout=exports.SEND_TIMEOUT }) {
   let attemptsLeft = getAttemptsLeft(this._retryOnSend)
   let err
+  let sendPromise
   while (attemptsLeft-- > 0) {
     try {
       yield this.ready()
-      return yield this._await(this._send({ message, link, timeout }))
+      sendPromise = this._send({ message, link, timeout })
+      return yield this._await(sendPromise)
     } catch (e) {
-      if (isDeveloperError(e)) throw e
+      Errors.rethrow(e, 'developer')
       err = e
     }
   }
 
-  this.emit('error', err)
   throw err
 })
 
@@ -836,7 +858,7 @@ proto._sendHTTP = co(function* ({ message, link, timeout }) {
   })
   .then(processResponse)
 
-  yield this._await(promise, timeout)
+  yield this._await(promise, { timeout })
 })
 
 proto._sendMQTT = co(function* ({ message, link, timeout }) {
@@ -863,7 +885,7 @@ proto._sendMQTT = co(function* ({ message, link, timeout }) {
     payload
   })
 
-  yield this._await(Promise.all([promisePublish, promiseAck]), timeout)
+  yield this._await(Promise.all([promisePublish, promiseAck]), { timeout })
   this._debug('delivered message!')
 })
 
