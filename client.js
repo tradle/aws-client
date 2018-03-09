@@ -134,10 +134,9 @@ proto._findPosition = co(function* () {
  * @param {Object} opts
  * @param {Object} opts.timeout
  * @param {Boolean} opts.ignoreErrors if true, this will resolve even on error
- * @param {Boolean} opts.emitErrors if true, this will emit the error as an event rather than rejecting
  */
 proto._await = co(function* (promise, opts={}) {
-  const { ignoreErrors, emitErrors, timeout } = opts
+  const { ignoreErrors, timeout } = opts
   const errorWatch = new Ultron(this)
   const rejectOnError = new Promise((resolve, reject) => errorWatch.once('error', reject))
   const race = [
@@ -152,15 +151,7 @@ proto._await = co(function* (promise, opts={}) {
   try {
     return yield Promise.race(race)
   } catch (err) {
-    if (rejectOnError.isRejected()) {
-      if (!ignoreErrors) throw err
-    }
-
-    if (emitErrors) {
-      this.emit('error', err)
-    } else if (!ignoreErrors) {
-      throw err
-    }
+    if (!ignoreErrors) throw err
   } finally {
     errorWatch.destroy()
     if (timeout) {
@@ -474,13 +465,20 @@ proto._reset = co(function* (opts={}) {
     const statePromise = this._state.await({ connected: true })
     // if we can't reconnect for a while,
     // emit error to trigger reset()
-    yield this._await(statePromise, {
-      emitErrors: true,
-      timeout: {
-        error: CONNECT_TIMEOUT_ERROR,
-        delay: exports.CONNECT_TIMEOUT
+    try {
+      yield this._await(statePromise, {
+        timeout: {
+          error: CONNECT_TIMEOUT_ERROR,
+          delay: exports.CONNECT_TIMEOUT
+        }
+      })
+    } catch (err) {
+      if (err === CONNECT_TIMEOUT_ERROR) {
+        this.emit('error', err)
       }
-    })
+
+      // other errors are handled automatically
+    }
   }).bind(this))
 
   const client = this._client
