@@ -12,6 +12,7 @@ const IotMessage = require('@tradle/iot-message')
 const Errors = require('@tradle/errors')
 const utils = require('./utils')
 const createState = require('./connection-state')
+const CustomErrors = require('./errors')
 const {
   Promise,
   RESOLVED,
@@ -41,8 +42,25 @@ const zlib = promisify(require('zlib'))
 const debug = require('./debug')
 const DATA_URL_REGEX = /data:.+\/.+;base64,.*/g
 const TESTING = process.env.NODE_ENV === 'test'
-const RETRY_DELAY_AFTER_ERROR = TESTING ? 100 : 5000
 const AUTH_FETCH_OPTS = { timeout: 5000 }
+
+const getRetryDelay = err => {
+  if (TESTING) return 100
+
+  if (Errors.matches(err, CustomErrors.ConnectTimeout)) return 5000
+  if (Errors.matches(err, CustomErrors.CloseTimeout)) return 3000
+  if (Errors.matches(err, CustomErrors.SendTimeout)) return 1000
+  if (Errors.matches(err, CustomErrors.CatchUpTimeout)) return 500
+  if (Errors.matches(err, CustomErrors.UploadEmbed)) return 500
+
+  return 5000
+}
+
+const CLOSE_TIMEOUT_ERROR = new CustomErrors.CloseTimeout('close timed out')
+const SEND_TIMEOUT_ERROR = new CustomErrors.SendTimeout('send timed out')
+const CATCH_UP_TIMEOUT_ERROR = new CustomErrors.CatchUpTimeout('catchup timed out')
+const CONNECT_TIMEOUT_ERROR = new CustomErrors.ConnectTimeout('connect timed out')
+const UPLOAD_EMBED_ERROR = new CustomErrors.UploadEmbed('embed failed to upload')
 
 // const EMBEDDED_DATA_URL_REGEX = /\"data:[^/]+\/[^;]+;base64,[^"]*\"/g
 const paths = {
@@ -51,10 +69,6 @@ const paths = {
   inbox: 'inbox'
 }
 
-const CLOSE_TIMEOUT_ERROR = new Error('close timed out')
-const SEND_TIMEOUT_ERROR = new Error('send timed out')
-const CATCH_UP_TIMEOUT_ERROR = new Error('catch-up timed out')
-const CONNECT_TIMEOUT_ERROR = new Error('connect timed out')
 exports = module.exports = Client
 exports.CLOSE_TIMEOUT = 1000
 exports.SEND_TIMEOUT = 6000
@@ -457,7 +471,7 @@ proto._reset = co(function* (opts={}) {
   this._myEvents.once('error', err => {
     debug('resetting due to error', err.stack)
     this._reset({
-      delay: RETRY_DELAY_AFTER_ERROR
+      delay: getRetryDelay(err)
     })
   })
 
@@ -468,12 +482,12 @@ proto._reset = co(function* (opts={}) {
     try {
       yield this._await(statePromise, {
         timeout: {
-          error: CONNECT_TIMEOUT_ERROR,
+          error: new CustomErrors.ConnectTimeout(`after ${exports.CONNECT_TIMEOUT}ms`),
           delay: exports.CONNECT_TIMEOUT
         }
       })
     } catch (err) {
-      if (err === CONNECT_TIMEOUT_ERROR) {
+      if (Errors.matches(err, CustomErrors.ConnectTimeout)) {
         this.emit('error', err)
       }
 
@@ -699,14 +713,14 @@ proto._close = co(function* (force) {
     try {
       yield this._await(client.end(), {
         timeout: {
-          error: CLOSE_TIMEOUT_ERROR,
+          error: new CustomErrors.CloseTimeout(`after ${CLOSE_TIMEOUT}ms`),
           delay: CLOSE_TIMEOUT
         }
       })
 
       return
     } catch (err) {
-      if (err === CLOSE_TIMEOUT_ERROR) {
+      if (Errors.matches(err, CustomErrors.CloseTimeout)) {
         this._debug(`polite close timed out after ${CLOSE_TIMEOUT}ms, forcing`)
       } else {
         this._debug('unexpected error on close', err)
@@ -718,12 +732,12 @@ proto._close = co(function* (force) {
     this._debug('forcing close')
     yield this._await(client.end(true), {
       timeout: {
-        error: CLOSE_TIMEOUT_ERROR,
+        error: new CustomErrors.CloseTimeout(`(forced) after ${CLOSE_TIMEOUT}ms`),
         delay: CLOSE_TIMEOUT
       }
     })
   } catch (err2) {
-    if (err2 === CLOSE_TIMEOUT_ERROR) {
+    if (Errors.matches(err2, CustomErrors.CloseTimeout)) {
       this._debug(`force close timed out after ${CLOSE_TIMEOUT}ms`)
     } else {
       this._debug('failed to force close, giving up', err2)
@@ -804,7 +818,7 @@ proto._send = co(function* ({ message, link, timeout }) {
       message = yield this._replaceDataUrls(message)
     } catch (err) {
       // trigger reset
-      this.emit('error', err)
+      this.emit('error', new CustomErrors.UploadEmbed(err.message))
       throw err
     }
   }
@@ -821,7 +835,7 @@ proto._send = co(function* ({ message, link, timeout }) {
       message: message.unserialized.object,
       link,
       timeout: {
-        error: SEND_TIMEOUT_ERROR,
+        error: new CustomErrors.SendTimeout(`after ${timeout}ms`),
         delay: timeout
       }
     })
