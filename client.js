@@ -3,7 +3,8 @@ const parseUrl = require('url').parse
 const { EventEmitter } = require('events')
 const crypto = require('crypto')
 const util = require('util')
-const _ = require('lodash')
+const cloneDeep = require('lodash/cloneDeep')
+const extend = require('lodash/extend')
 const awsIot = require('aws-iot-device-sdk')
 const bindAll = require('bindall')
 const Ultron = require('ultron')
@@ -770,10 +771,10 @@ proto.announcePosition = co(function* () {
 
 proto._replaceDataUrls = co(function* (message) {
   const copy = Buffer.isBuffer(message)
-    ? _.cloneDeep(message.unserialized.object)
-    : _.cloneDeep(message)
+    ? cloneDeep(message.unserialized.object)
+    : cloneDeep(message)
 
-  const changed = yield extractAndUploadEmbeds(_.extend({
+  const changed = yield extractAndUploadEmbeds(extend({
     object: copy,
     region: this._region,
     endpoint: this._s3Endpoint,
@@ -783,7 +784,7 @@ proto._replaceDataUrls = co(function* (message) {
   if (!changed) return message
 
   const serialized = utils.serializeMessage(copy)
-  serialized.unserialized = _.extend({}, message.unserialized || {}, {
+  serialized.unserialized = extend({}, message.unserialized || {}, {
     object: copy
   })
 

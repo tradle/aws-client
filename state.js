@@ -1,13 +1,13 @@
 const Promise = require('bluebird')
 const { EventEmitter } = require('events')
-const _ = require('lodash')
+const clone = require('lodash/clone')
 const {
   RESOLVED
 } = require('./utils')
 
 module.exports = function createState (initial) {
   const waiting = []
-  const internal = _.clone(initial)
+  const internal = clone(initial)
   const myState = new EventEmitter()
 
   myState.is = state => {

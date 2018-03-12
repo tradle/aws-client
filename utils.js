@@ -3,7 +3,8 @@ const IP = require('ip')
 const Promise = require('bluebird')
 const { AssertionError } = require('assert')
 const crypto = require('crypto')
-const _ = require('lodash')
+const omit = require('lodash/omit')
+const extend = require('lodash/extend')
 const fetch = require('isomorphic-fetch')
 const stringify = JSON.stringify.bind(JSON)
 const co = require('co').wrap
@@ -42,7 +43,7 @@ const wrappedFetch = co(function* (url, opts={}) {
 
   const result = yield Promise.race([
     timeBomb,
-    utils._fetch(url, _.omit(opts, 'timeout')).catch(redirectTypeErrors)
+    utils._fetch(url, omit(opts, 'timeout')).catch(redirectTypeErrors)
   ])
 
   timeBomb.cancel()
@@ -50,7 +51,7 @@ const wrappedFetch = co(function* (url, opts={}) {
 })
 
 const post = co(function* (url, data, opts={}) {
-  const res = yield utils.fetch(url, _.extend({
+  const res = yield utils.fetch(url, extend({
     method: 'POST',
     headers: {
       'Accept': 'application/json',
@@ -156,7 +157,7 @@ const uploadToS3 = co(function* ({
   host,
   s3Url
 }) {
-  const signer = new AwsSigner(_.extend({
+  const signer = new AwsSigner(extend({
     service: 's3',
     region,
   }, credentials))
