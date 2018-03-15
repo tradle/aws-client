@@ -3,8 +3,8 @@ const parseUrl = require('url').parse
 const { EventEmitter } = require('events')
 const crypto = require('crypto')
 const util = require('util')
-const cloneDeep = require('lodash/cloneDeep')
 const extend = require('lodash/extend')
+const cloneDeep = require('lodash/cloneDeep')
 const awsIot = require('aws-iot-device-sdk')
 const bindAll = require('bindall')
 const Ultron = require('ultron')
@@ -88,6 +88,8 @@ module.exports = Client
 function Client ({
   node,
   endpoint,
+  iotEndpoint,
+  parentTopic,
   clientId,
   getSendPosition,
   getReceivePosition,
@@ -108,7 +110,9 @@ function Client ({
     typeof node.sign === 'function' &&
     typeof node.permalink === 'string', 'expected "node" with function "sign" and string "permalink"')
 
-  this._endpoint = endpoint.replace(/\/+$/, '')
+  this._endpoint = trimTrailingSlashes(endpoint)
+  this._iotEndpoint = iotEndpoint ? trimTrailingSlashes(iotEndpoint) : undefined
+  this._parentTopic = parentTopic
   this._client = null
   this._clientId = clientId
   this._encoding = encoding
@@ -119,6 +123,7 @@ function Client ({
   this._getSendPosition = getSendPosition
   this._getReceivePosition = getReceivePosition
   this._retryOnSend = retryOnSend
+
   this._isLocalServer = isLocalUrl(this._endpoint)
   this.setMaxListeners(0)
   this._reset()
@@ -304,6 +309,17 @@ proto._authStep1 = co(function* () {
     clientId: this._clientId,
     identity: this._node.identity,
   }, AUTH_FETCH_OPTS)
+
+  if (!this._step1Result.challenge) {
+    const respStr = JSON.stringify(this._step1Result)
+    throw new CustomErrors.AuthFailed(`unexpected response: ${respStr}`)
+  }
+
+  if (!this._step1Result.iotEndpoint) {
+    if (!this._iotEndpoint) throw new CustomErrors.AuthFailed('missing iotEndpoint')
+
+    this._step1Result.iotEndpoint = this._iotEndpoint
+  }
 
   this._postProcessAuthResponse(this._step1Result)
   return this._step1Result
@@ -910,3 +926,4 @@ const getAttemptsLeft = retries => {
 }
 
 const getPayload = message => [message]
+const trimTrailingSlashes = str => str.replace(/\/+$/, '')

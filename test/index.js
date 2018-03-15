@@ -259,6 +259,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
   const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
     if (/preauth/.test(url)) {
       return {
+        challenge: 'abc',
         iotParentTopic,
         iotEndpoint,
         time: Date.now()
@@ -420,7 +421,8 @@ test('reset on error', loudCo(function* (t) {
       return {
         time: Date.now(),
         iotParentTopic,
-        iotEndpoint
+        iotEndpoint,
+        challenge: 'abc',
       }
     }
 
@@ -548,7 +550,8 @@ test('reset on error', loudCo(function* (t) {
         return {
           time: Date.now(),
           iotEndpoint,
-          iotParentTopic
+          iotParentTopic,
+          challenge: 'abc'
         }
       }
 
@@ -632,7 +635,8 @@ test('upload', loudCo(function* (t) {
         iotParentTopic,
         accessKey: 'abc',
         secretKey: 'def',
-        sessionToken: 'ghi'
+        sessionToken: 'ghi',
+        challenge: 'abc',
       }
     }
 
