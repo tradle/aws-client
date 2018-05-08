@@ -654,9 +654,11 @@ proto._receiveMessages = co(function* ({ messages }) {
 
 proto._processMessage = co(function* (message) {
   const { recipientPubKey } = message
-  const { pub } = recipientPubKey
-  if (!Buffer.isBuffer(pub)) {
-    recipientPubKey.pub = new Buffer(pub.data)
+  if (recipientPubKey) {
+    const { pub } = recipientPubKey
+    if (!Buffer.isBuffer(pub)) {
+      recipientPubKey.pub = new Buffer(pub.data)
+    }
   }
 
   yield resolveEmbeds(message, this._maxRequestConcurrency)
