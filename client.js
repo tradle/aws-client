@@ -249,7 +249,7 @@ proto._setCatchUpTarget = function ({ sent, received }) {
 
   const checkIfCaughtUp = messages => {
     const caughtUp = messages.some(message => {
-      return /*message.link === sent.link ||*/ message.time >= sent.time
+      return /*message.link === sent.link ||*/ getMessageTime(message) >= sent.time
     })
 
     if (!caughtUp) {
@@ -929,3 +929,4 @@ const getAttemptsLeft = retries => {
 
 const getPayload = message => [message]
 const trimTrailingSlashes = str => str.replace(/\/+$/, '')
+const getMessageTime = msg => msg._time || msg.time // .time for backwards compat
