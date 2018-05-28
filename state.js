@@ -1,4 +1,3 @@
-const Promise = require('bluebird')
 const { EventEmitter } = require('events')
 const clone = require('lodash/clone')
 const {

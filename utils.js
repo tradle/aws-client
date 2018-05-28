@@ -1,6 +1,5 @@
 const parseURL = require('url').parse
 const IP = require('ip')
-const Promise = require('bluebird')
 const { AssertionError } = require('assert')
 const crypto = require('crypto')
 const omit = require('lodash/omit')
