@@ -7,5 +7,7 @@ module.exports = {
   CatchUpTimeout: ex('CatchUpTimeout'),
   ConnectTimeout: ex('ConnectTimeout'),
   UploadEmbed: ex('UploadEmbed'),
-  AuthFailed: ex('AuthFailed')
+  AuthFailed: ex('AuthFailed'),
+  FetchTimeout: ex('FetchTimeout'),
+  Timeout: ex('Timeout'),
 }

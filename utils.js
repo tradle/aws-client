@@ -18,10 +18,10 @@ const {
   encodeDataURI
 } = require('@tradle/embed')
 
+const CustomErrors = require('./errors')
 const fetchImpl = require('./fetch')
 
 const RESOLVED = Promise.resolve()
-const FETCH_TIMED_OUT = new Error('fetch timed out')
 
 const redirectTypeErrors = err => {
   if (err instanceof TypeError) {
@@ -31,22 +31,31 @@ const redirectTypeErrors = err => {
   throw err
 }
 
-const wrappedFetch = co(function* (url, opts={}) {
-  const { timeout } = opts
-  if (!timeout) return yield utils._fetch(url, opts).catch(redirectTypeErrors)
+const runWithTimeout = co(function* (fn, timeout) {
+  if (!timeout) {
+    return fn()
+  }
 
   const timeBomb = delayThrow({
-    error: new Error(`fetch timed out after: ${timeout}ms`),
+    createError: () => new CustomErrors.Timeout(`${fn.name} timed out after: ${timeout}ms`),
     delay: timeout
   })
 
-  const result = yield Promise.race([
-    timeBomb,
-    utils._fetch(url, omit(opts, 'timeout')).catch(redirectTypeErrors)
-  ])
+  try {
+    return yield Promise.race([
+      timeBomb,
+      fn(),
+    ])
+  } finally {
+    timeBomb.cancel()
+  }
+})
 
-  timeBomb.cancel()
-  return result
+const wrappedFetch = co(function* (url, opts={}) {
+  return yield runWithTimeout(
+    () => utils._fetch(url, opts).catch(redirectTypeErrors),
+    opts.timeout
+  )
 })
 
 const post = co(function* (url, data, opts={}) {
@@ -132,11 +141,11 @@ const extractAndUploadEmbeds = co(function* (opts) {
   const { object, region, credentials } = opts
   const replacements = replaceDataUrls(opts)
   if (replacements.length) {
-    yield replacements.map(replacement => {
+    yield Promise.all(replacements.map(replacement => {
       replacement.region = region
       replacement.credentials = credentials
       return uploadToS3(replacement)
-    })
+    }))
 
     return true
   }
@@ -204,9 +213,12 @@ const assert = (statement, errMsg) => {
   if (!statement) throw new Error(errMsg || 'assertion failed')
 }
 
-const delayThrow = ({ error, delay }) => {
+const delayThrow = ({ createError, delay }) => {
   const promise = defer()
-  const timeout = setTimeout(() => promise.reject(error), delay)
+  const timeout = setTimeout(() => {
+    promise.reject(createError())
+  }, delay)
+
   promise.cancel = () => {
     clearTimeout(timeout)
     promise.resolve()

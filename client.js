@@ -97,7 +97,8 @@ function Client ({
   counterparty,
   httpOnly,
   retryOnSend=true,
-  maxRequestConcurrency=10
+  maxRequestConcurrency=10,
+  autostart=true,
 }) {
   EventEmitter.call(this)
   bindAll(this)
@@ -125,8 +126,11 @@ function Client ({
   this._retryOnSend = retryOnSend
 
   this._isLocalServer = isLocalUrl(this._endpoint)
+  this._name = node.name || (counterparty && counterparty.slice(0, 6))
   this.setMaxListeners(0)
-  this._reset()
+  if (autostart) {
+    this.start()
+  }
 }
 
 util.inherits(Client, EventEmitter)
@@ -181,8 +185,8 @@ proto._await = co(function* (promise, opts={}) {
 })
 
 proto._debug = function (...args) {
-  if (this._counterparty) {
-    args.unshift(this._counterparty.slice(0, 6))
+  if (this._name) {
+    args.unshift(this._name)
   }
 
   debug(...args)
@@ -358,14 +362,7 @@ proto._authStep2 = co(function* () {
   })
 
   this._debug('sending challenge response')
-  try {
-    this._step2Result = yield utils.post(`${this._endpoint}/${paths.auth}`, signed.object, AUTH_FETCH_OPTS)
-  } catch (err) {
-    if (/timed\s+out/i.test(err.message)) return this._auth()
-
-    throw err
-  }
-
+  this._step2Result = yield utils.post(`${this._endpoint}/${paths.auth}`, signed.object, AUTH_FETCH_OPTS)
   this._setCatchUpTarget(this._step2Result.position)
   this._adjustServerTime({
     serverEnd: this._step2Result.time
@@ -469,12 +466,18 @@ proto._promiseListen = function (event) {
   return this._await(new Promise(resolve => this._myEvents.once(event, resolve)))
 }
 
+proto.start = function () {
+  if (!this._state) {
+    this.reset()
+  }
+}
+
 proto.reset = function reset () {
   this._reset()
 }
 
 proto._reset = co(function* (opts={}) {
-  const { position, delay } = opts
+ const { position, delay } = opts
   this._state = createState()
   this._state.resetting = true
   this._serverAheadMillis = 0
@@ -499,7 +502,9 @@ proto._reset = co(function* (opts={}) {
     try {
       yield this._await(statePromise, {
         timeout: {
-          error: new CustomErrors.ConnectTimeout(`after ${exports.CONNECT_TIMEOUT}ms`),
+          createError: () => {
+            return new CustomErrors.ConnectTimeout(`after ${exports.CONNECT_TIMEOUT}ms`)
+          },
           delay: exports.CONNECT_TIMEOUT
         }
       })
@@ -546,6 +551,11 @@ proto.publish = co(function* ({ topic, payload, qos=1 }) {
 })
 
 proto._subscribe = co(function* () {
+  if (!this._client) {
+    this._debug('client not set up, cannot subscribe')
+    return
+  }
+
   const topic = this._prefixTopic(`${this._clientId}/sub/+`)
   this._debug(`subscribing to topic: ${topic}`)
   try {
@@ -647,7 +657,7 @@ proto._receiveReject = function (payload) {
 }
 
 proto._receiveMessages = co(function* ({ messages }) {
-  messages = yield messages.map(this._processMessage)
+  messages = yield Promise.all(messages.map(this._processMessage))
   this.emit('messages', messages)
   // messages.forEach(message => this.emit('message', message))
 })
@@ -732,7 +742,7 @@ proto._close = co(function* (force) {
     try {
       yield this._await(client.end(), {
         timeout: {
-          error: new CustomErrors.CloseTimeout(`after ${CLOSE_TIMEOUT}ms`),
+          createError: () => new CustomErrors.CloseTimeout(`after ${CLOSE_TIMEOUT}ms`),
           delay: CLOSE_TIMEOUT
         }
       })
@@ -751,7 +761,7 @@ proto._close = co(function* (force) {
     this._debug('forcing close')
     yield this._await(client.end(true), {
       timeout: {
-        error: new CustomErrors.CloseTimeout(`(forced) after ${CLOSE_TIMEOUT}ms`),
+        createError: () => new CustomErrors.CloseTimeout(`(forced) after ${CLOSE_TIMEOUT}ms`),
         delay: CLOSE_TIMEOUT
       }
     })
@@ -854,7 +864,7 @@ proto._send = co(function* ({ message, link, timeout }) {
       message: message.unserialized.object,
       link,
       timeout: {
-        error: new CustomErrors.SendTimeout(`after ${timeout}ms`),
+        createError: () => new CustomErrors.SendTimeout(`after ${timeout}ms`),
         delay: timeout
       }
     })
