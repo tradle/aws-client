@@ -477,7 +477,7 @@ proto.reset = function reset () {
 }
 
 proto._reset = co(function* (opts={}) {
- const { position, delay } = opts
+  const { position, delay } = opts
   this._state = createState()
   this._state.resetting = true
   this._serverAheadMillis = 0
