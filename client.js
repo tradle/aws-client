@@ -853,9 +853,17 @@ proto._send = co(function* ({ message, link, timeout }) {
   }
 
   const length = message.length
-  const useHttp = !this._client ||
-    this._httpOnly ||
-    length * 2 > MQTT_MAX_MESSAGE_SIZE // gzip will cut the size 5-10x
+  let useHttp
+  if (this._httpOnly) {
+    this._debug('sending over http: in http-only mode')
+    useHttp = true
+  } else if (length * 2 > MQTT_MAX_MESSAGE_SIZE) { // gzip will cut the size 5-10x
+    this._debug(`sending over http: message too big (${length} bytes)`)
+    useHttp = true
+  } else if (!this._client) {
+    this._debug('sending over http: mqtt client not present')
+    useHttp = true
+  }
 
   const send = useHttp ? this._sendHTTP : this._sendMQTT
   this._sending = link
