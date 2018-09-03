@@ -886,7 +886,7 @@ proto._sendHTTP = co(function* ({ message, link, timeout }) {
     'Content-Type': 'application/json'
   }
 
-  let payload = stringify(getPayload(message))
+  let payload = stringify({ messages: [message] })
   if (!this._isLocalServer) {
     payload = yield this._await(zlib.gzip(payload))
     headers['Content-Encoding'] = 'gzip'
@@ -909,7 +909,7 @@ proto._sendMQTT = co(function* ({ message, link, timeout }) {
   }
 
   const payload = yield this._await(IotMessage.encode({
-    payload: getPayload(message),
+    payload: [message],
     encoding: 'gzip'
   }))
 
@@ -937,6 +937,5 @@ const getAttemptsLeft = retries => {
   return 1
 }
 
-const getPayload = message => [message]
 const trimTrailingSlashes = str => str.replace(/\/+$/, '')
 const getMessageTime = msg => msg._time || msg.time // .time for backwards compat
