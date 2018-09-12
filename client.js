@@ -489,7 +489,7 @@ proto._reset = co(function* (opts={}) {
 
   this._myEvents = new Ultron(this)
   this._myEvents.once('error', err => {
-    debug('resetting due to error', err.stack)
+    this._debug('resetting due to error', err.stack)
     this._reset({
       delay: getRetryDelay(err)
     })
@@ -823,13 +823,18 @@ proto.send = co(function* ({ message, link, timeout=exports.SEND_TIMEOUT }) {
   let attemptsLeft = getAttemptsLeft(this._retryOnSend)
   let err
   let sendPromise
-  while (attemptsLeft-- > 0) {
+  let iterationStart
+  while (attemptsLeft-- > 0 && timeout > 0) {
+    if (err) this._debug('retrying send')
+
+    iterationStart = Date.now()
     try {
       yield this.ready()
       sendPromise = this._send({ message, link, timeout })
       return yield this._await(sendPromise)
     } catch (e) {
       Errors.rethrow(e, 'developer')
+      timeout -= (Date.now() - iterationStart)
       err = e
     }
   }
