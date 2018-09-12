@@ -4,6 +4,7 @@ const { EventEmitter } = require('events')
 const crypto = require('crypto')
 const util = require('util')
 const extend = require('lodash/extend')
+const once = require('lodash/once')
 const cloneDeep = require('lodash/cloneDeep')
 const awsIot = require('aws-iot-device-sdk')
 const bindAll = require('bindall')
@@ -34,7 +35,10 @@ const {
   delayThrow,
   processResponse,
   isLocalUrl,
-  isLocalHost
+  isLocalHost,
+  preventConcurrency,
+  closeAwsIotClient,
+  series,
 } = utils
 
 const zlib = promisify(require('zlib'))
@@ -43,7 +47,6 @@ const zlib = promisify(require('zlib'))
 const debug = require('./debug')
 const DATA_URL_REGEX = /data:.+\/.+;base64,.*/g
 const TESTING = process.env.NODE_ENV === 'test'
-const AUTH_FETCH_OPTS = { timeout: 5000 }
 
 const getRetryDelay = err => {
   if (TESTING) return 100
@@ -71,6 +74,7 @@ const paths = {
 }
 
 exports = module.exports = Client
+exports.AUTH_TIMEOUT = 5000
 exports.CLOSE_TIMEOUT = 1000
 exports.SEND_TIMEOUT = 6000
 exports.CATCH_UP_TIMEOUT = 5000
@@ -126,7 +130,8 @@ function Client ({
   this._retryOnSend = retryOnSend
 
   this._isLocalServer = isLocalUrl(this._endpoint)
-  this._name = node.name || (counterparty && counterparty.slice(0, 6))
+  this._name = node.name || counterparty && counterparty.slice(0, 6)
+  this._myEvents = new Ultron(this)
   this.setMaxListeners(0)
   if (autostart) {
     this.start()
@@ -157,15 +162,12 @@ proto._findPosition = co(function* () {
  * @param {Promise} [promise] task to wait for
  * @param {Object} opts
  * @param {Object} opts.timeout
- * @param {Boolean} opts.ignoreErrors if true, this will resolve even on error
  */
 proto._await = co(function* (promise, opts={}) {
-  const { ignoreErrors, timeout } = opts
-  const errorWatch = new Ultron(this)
-  const rejectOnError = new Promise((resolve, reject) => errorWatch.once('error', reject))
+  const { timeout } = opts
   const race = [
     promise,
-    rejectOnError
+    this._errorPromise,
   ]
 
   if (timeout) {
@@ -174,10 +176,7 @@ proto._await = co(function* (promise, opts={}) {
 
   try {
     return yield Promise.race(race)
-  } catch (err) {
-    if (!ignoreErrors) throw err
   } finally {
-    errorWatch.destroy()
     if (timeout) {
       race.pop().cancel()
     }
@@ -190,20 +189,6 @@ proto._debug = function (...args) {
   }
 
   debug(...args)
-}
-
-proto._maybeStart = function () {
-  if (!(this._node && this._position)) return
-
-  this._auth().catch(err => {
-    // this._authenticating = false
-    this._debug('auth failed')
-    this.emit('error', err)
-  })
-}
-
-proto.now = function () {
-  return Date.now() + this._serverAheadMillis
 }
 
 proto._adjustServerTime = function ({ localEnd=Date.now(), serverEnd }) {
@@ -294,25 +279,30 @@ proto._watchCatchUp = co(function* () {
   }
 })
 
-proto.ready = co(function* () {
-  yield this._loopUntilStateIs({ canSend: true })
-})
+// proto.ready = co(function* () {
+//   yield this._loopUntilStateIs({ canSend: true })
+// })
 
-proto._loopUntilStateIs = co(function* (desiredState) {
-  const statePromise = this._state.await(desiredState)
-  yield this._await(statePromise, { ignoreErrors: true })
-  if (this._state.is(desiredState)) return
-
-  // we prob experienced an error and reset
-  // let's try again...
-  yield this._loopUntilStateIs(desiredState)
+proto._loopUntilStateIs = co(function* (state) {
+  while (!this._state.is(state)) {
+    try {
+      yield this._await(this._state.await(state))
+    } catch (err) {
+      // handled internally
+      this._debug('looping till state is', state)
+    }
+  }
 })
 
 proto._authStep1 = co(function* () {
-  this._step1Result = yield utils.post(`${this._endpoint}/${paths.preauth}`, {
-    clientId: this._clientId,
-    identity: this._node.identity,
-  }, AUTH_FETCH_OPTS)
+  this._step1Result = yield this._await(utils.post({
+    url: `${this._endpoint}/${paths.preauth}`,
+    body: {
+      clientId: this._clientId,
+      identity: this._node.identity,
+    },
+    timeout: exports.AUTH_TIMEOUT,
+  }))
 
   if (!this._step1Result.challenge) {
     const respStr = JSON.stringify(this._step1Result)
@@ -362,7 +352,12 @@ proto._authStep2 = co(function* () {
   })
 
   this._debug('sending challenge response')
-  this._step2Result = yield utils.post(`${this._endpoint}/${paths.auth}`, signed.object, AUTH_FETCH_OPTS)
+  this._step2Result = yield utils.post({
+    url: `${this._endpoint}/${paths.auth}`,
+    body: signed.object,
+    timeout: exports.AUTH_TIMEOUT,
+  })
+
   this._setCatchUpTarget(this._step2Result.position)
   this._adjustServerTime({
     serverEnd: this._step2Result.time
@@ -456,9 +451,7 @@ proto._auth = co(function* () {
   this._clientEvents.on('offline', this._onoffline)
   this._clientEvents.on('close', this._onclose)
   this._clientEvents.once('error', err => {
-    if (!this._state.resetting) {
-      this.emit('error', err)
-    }
+    this._fail(err)
   })
 })
 
@@ -466,18 +459,11 @@ proto._promiseListen = function (event) {
   return this._await(new Promise(resolve => this._myEvents.once(event, resolve)))
 }
 
-proto.start = function () {
-  if (!this._state) {
-    this.reset()
-  }
-}
+proto.reset = co(function* () {
+  this._fail(new CustomErrors.ResetButtonPressed('developer called reset()'))
+})
 
-proto.reset = function reset () {
-  this._reset()
-}
-
-proto._reset = co(function* (opts={}) {
-  const { position, delay } = opts
+proto._reset = preventConcurrency(co(function* () {
   this._state = createState()
   this._state.resetting = true
   this._serverAheadMillis = 0
@@ -487,21 +473,21 @@ proto._reset = co(function* (opts={}) {
     this._myEvents.remove()
   }
 
-  this._myEvents = new Ultron(this)
-  this._myEvents.once('error', err => {
-    this._debug('resetting due to error', err.stack)
-    this._reset({
-      delay: getRetryDelay(err)
-    })
+  this._errorPromise = new Promise((resolve, reject) => {
+    this._fail = (err, skipReset) => {
+      this._debug('resetting due to error', err.stack)
+      reject(err)
+    }
   })
 
+  this._myEvents = new Ultron(this)
   this._myEvents.on('disconnect', co(function* () {
     const statePromise = this._state.await({ connected: true })
     // if we can't reconnect for a while,
     // emit error to trigger reset()
     try {
       yield this._await(statePromise, {
-        timeout: {
+        timeoutOpts: {
           createError: () => {
             return new CustomErrors.ConnectTimeout(`after ${exports.CONNECT_TIMEOUT}ms`)
           },
@@ -510,7 +496,7 @@ proto._reset = co(function* (opts={}) {
       })
     } catch (err) {
       if (Errors.matches(err, CustomErrors.ConnectTimeout)) {
-        this.emit('error', err)
+        this._fail(err)
       }
 
       // other errors are handled automatically
@@ -519,27 +505,23 @@ proto._reset = co(function* (opts={}) {
 
   const client = this._client
   if (client) {
-    // temporary catch
-    client.handleMessage = (packet, cb) => {
-      this._debug('ignoring event received during reset', packet)
-      cb(new Error('resetting'))
+    yield closeAwsIotClient({
+      client,
+      timeout: exports.CLOSE_TIMEOUT,
+      force: true,
+      log: this._debug,
+    })
+
+    if (this._clientEvents) {
+      this._clientEvents.remove()
+      this._clientEvents = null
     }
 
-    yield this.close(true)
+    this._client = null
   }
 
   this._state.resetting = false
-  if (delay) {
-    this._debug(`waiting ${delay} before next attempt`)
-    yield wait(delay)
-  }
-
-  if (position) {
-    this._setPosition(position)
-  } else {
-    this._findPosition()
-  }
-})
+}))
 
 proto.publish = co(function* ({ topic, payload, qos=1 }) {
   yield this._await(this._state.await({ canPublish: true }))
@@ -562,7 +544,7 @@ proto._subscribe = co(function* () {
     yield this._client.subscribe(topic, { qos: 1 })
   } catch (err) {
     this._debug('failed to subscribe')
-    this.emit('error', err)
+    this._fail(err)
     return
   }
 
@@ -614,7 +596,7 @@ proto._handleMessage = co(function* (topic, payload) {
     this._receiveReject(payload)
     break
   case 'error':
-    this.emit('error', new Error(JSON.stringify(payload || '')))
+    this._fail(new Error(JSON.stringify(payload || '')))
     break
   default:
     this._debug(`don't know how to handle "${topic}" events`)
@@ -721,59 +703,6 @@ proto._onclose = function () {
   this._debug('disconnected')
 }
 
-proto.close = co(function* (force) {
-  const client = this._client
-  if (!client) return
-
-  yield this._close(force)
-  if (this._clientEvents) {
-    this._clientEvents.remove()
-    this._clientEvents = null
-  }
-
-  this._client = null
-})
-
-proto._close = co(function* (force) {
-  const { CLOSE_TIMEOUT } = exports
-  const client = this._client
-  if (!force) {
-    this._debug('attempting polite close')
-    try {
-      yield this._await(client.end(), {
-        timeout: {
-          createError: () => new CustomErrors.CloseTimeout(`after ${CLOSE_TIMEOUT}ms`),
-          delay: CLOSE_TIMEOUT
-        }
-      })
-
-      return
-    } catch (err) {
-      if (Errors.matches(err, CustomErrors.CloseTimeout)) {
-        this._debug(`polite close timed out after ${CLOSE_TIMEOUT}ms, forcing`)
-      } else {
-        this._debug('unexpected error on close', err)
-      }
-    }
-  }
-
-  try {
-    this._debug('forcing close')
-    yield this._await(client.end(true), {
-      timeout: {
-        createError: () => new CustomErrors.CloseTimeout(`(forced) after ${CLOSE_TIMEOUT}ms`),
-        delay: CLOSE_TIMEOUT
-      }
-    })
-  } catch (err2) {
-    if (Errors.matches(err2, CustomErrors.CloseTimeout)) {
-      this._debug(`force close timed out after ${CLOSE_TIMEOUT}ms`)
-    } else {
-      this._debug('failed to force close, giving up', err2)
-    }
-  }
-})
-
 proto.announcePosition = co(function* () {
   if (!this._position) {
     yield this._await(this._findPosition())
@@ -819,6 +748,52 @@ proto._replaceDataUrls = co(function* (message) {
   return serialized
 })
 
+// PUBLIC API START
+
+// this loops forever (until client is stopped)
+proto.start = co(function* () {
+  if (this._stopping) {
+    throw new CustomErrors.IllegalInvocation('already stopping/stopped, create a new instance please')
+  }
+
+  if (this._running) {
+    // all good
+    return
+  }
+
+  this._running = true
+
+  // used after first iteration
+  let err
+
+  const steps = [
+    () => this._reset(),
+    () => this._await(this._auth(), { timeoutOpts: exports.AUTH_TIMEOUT }),
+    () => this._await(this._state.await({ canSend: true }), { timeoutOpts: exports.CATCH_UP_TIMEOUT }),
+    // wait to fail and start over
+    () => this._errorPromise,
+  ]
+
+  while (!this._stopping) {
+    try {
+      yield series(steps)
+    } catch (err) {
+      this._debug('resetting main loop due to error', err)
+      const millis = getRetryDelay(err)
+      if (millis) yield wait(millis)
+    }
+  }
+})
+
+proto.stop = co(function* (force) {
+  this._stopping = true
+  this._fail(new CustomErrors.StopButtonPressed('developer stopped me'))
+})
+
+proto.now = function () {
+  return Date.now() + this._serverAheadMillis
+}
+
 proto.send = co(function* ({ message, link, timeout=exports.SEND_TIMEOUT }) {
   let attemptsLeft = getAttemptsLeft(this._retryOnSend)
   let err
@@ -829,7 +804,13 @@ proto.send = co(function* ({ message, link, timeout=exports.SEND_TIMEOUT }) {
 
     iterationStart = Date.now()
     try {
-      yield this.ready()
+      yield this._await(this._state.await({ canSend: true }), {
+        timeoutOpts: {
+          delay: timeout,
+          createError: () => new CustomErrors.SendTimeout('timed out waiting for send prerequisites')
+        }
+      })
+
       sendPromise = this._send({ message, link, timeout })
       return yield this._await(sendPromise)
     } catch (e) {
@@ -842,6 +823,8 @@ proto.send = co(function* ({ message, link, timeout=exports.SEND_TIMEOUT }) {
   throw err
 })
 
+// PUBLIC API END
+
 proto._send = co(function* ({ message, link, timeout }) {
   if (this._sending) {
     throw new Error('send one message at a time!')
@@ -852,7 +835,7 @@ proto._send = co(function* ({ message, link, timeout }) {
       message = yield this._replaceDataUrls(message)
     } catch (err) {
       // trigger reset
-      this.emit('error', new CustomErrors.UploadEmbed(err.message))
+      this._fail(new CustomErrors.UploadEmbed(err.message))
       throw err
     }
   }
@@ -876,7 +859,7 @@ proto._send = co(function* ({ message, link, timeout }) {
     return yield send({
       message: message.unserialized.object,
       link,
-      timeout: {
+      timeoutOpts: {
         createError: () => new CustomErrors.SendTimeout(`after ${timeout}ms`),
         delay: timeout
       }
@@ -891,7 +874,7 @@ proto._send = co(function* ({ message, link, timeout }) {
   }
 })
 
-proto._sendHTTP = co(function* ({ message, link, timeout }) {
+proto._sendHTTP = co(function* ({ message, link, timeoutOpts }) {
   this._debug('sending over HTTP')
   const url = `${this._endpoint}/${paths.inbox}`
   const headers = {
@@ -905,17 +888,16 @@ proto._sendHTTP = co(function* ({ message, link, timeout }) {
     headers['Content-Encoding'] = 'gzip'
   }
 
-  const promise = utils.fetch(url, {
-    method: 'POST',
+  const promise = utils.post({
+    url,
     headers,
     body: payload
   })
-  .then(processResponse)
 
-  yield this._await(promise, { timeout })
+  yield this._await(promise, { timeoutOpts })
 })
 
-proto._sendMQTT = co(function* ({ message, link, timeout }) {
+proto._sendMQTT = co(function* ({ message, link, timeoutOpts }) {
   this._debug('sending over MQTT')
   if (this._sendMQTTSession) {
     this._sendMQTTSession.destroy()
@@ -939,7 +921,7 @@ proto._sendMQTT = co(function* ({ message, link, timeout }) {
     payload
   })
 
-  yield this._await(Promise.all([promisePublish, promiseAck]), { timeout })
+  yield this._await(Promise.all([promisePublish, promiseAck]), { timeoutOpts })
   this._debug('delivered message!')
 })
 

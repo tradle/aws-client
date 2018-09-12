@@ -20,6 +20,7 @@ const {
 
 const CustomErrors = require('./errors')
 const fetchImpl = require('./fetch')
+const debug = require('./debug')
 
 const RESOLVED = Promise.resolve()
 
@@ -46,29 +47,28 @@ const runWithTimeout = co(function* (fn, timeout) {
       timeBomb,
       fn(),
     ])
+  } catch (err) {
+    throw err
   } finally {
     timeBomb.cancel()
   }
 })
 
-const wrappedFetch = co(function* (url, opts={}) {
-  return yield runWithTimeout(
-    () => utils._fetch(url, opts).catch(redirectTypeErrors),
-    opts.timeout
-  )
-})
+const wrappedFetch = (url, opts={}) => runWithTimeout(
+  () => utils._fetch(url, omit(opts, 'timeout')),
+  opts.timeout,
+).then(processResponse, redirectTypeErrors)
 
-const post = co(function* (url, data, opts={}) {
-  const res = yield utils.fetch(url, extend({
+const post = co(function* ({ url, body, headers={}, timeout }) {
+  return utils.fetch(url, {
     method: 'POST',
-    headers: {
+    headers: extend({
       'Accept': 'application/json',
       'Content-Type': 'application/json'
-    },
-    body: stringify(data)
-  }, opts))
-
-  return processResponse(res)
+    }, headers),
+    body: stringify(body),
+    timeout,
+  })
 })
 
 const processResponse = co(function* (res) {
@@ -187,14 +187,12 @@ const uploadToS3 = co(function* ({
   }
 
   request.headers = signer.sign(request)
-  const res = yield utils.fetch(request.url, request)
-  yield processResponse(res)
-  return res
+  return yield utils.fetch(request.url, request)
 })
 
 const download = co(function* ({ url }) {
   const res = yield utils.fetch(url)
-  if (res.status > 300) {
+  if (!res.ok || res.status > 300) {
     const text = yield res.text()
     throw new Error(text)
   }
@@ -214,16 +212,19 @@ const assert = (statement, errMsg) => {
 }
 
 const delayThrow = ({ createError, delay }) => {
-  const promise = defer()
-  const timeout = setTimeout(() => {
-    promise.reject(createError())
-  }, delay)
+  let cancel
+  const promise = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(createError())
+    }, delay)
 
-  promise.cancel = () => {
-    clearTimeout(timeout)
-    promise.resolve()
-  }
+    cancel = () => {
+      clearTimeout(timeout)
+      resolve()
+    }
+  })
 
+  promise.cancel = cancel
   return promise
 }
 
@@ -262,13 +263,75 @@ const isLocalHost = host => {
   return isIP && IP.isPrivate(host)
 }
 
+const preventConcurrency = fn => {
+  let promise = RESOLVED
+  return co(function* (...args) {
+    try {
+      yield promise
+    } finally {
+      return promise = fn.apply(this, args)
+    }
+  })
+}
+
+const closeAwsIotClient = co(function* ({ client, timeout, force, log=debug }) {
+  // temporary catch
+  client.handleMessage = (packet, cb) => {
+    log('ignoring packet received during close', packet)
+    cb(new Error('closing'))
+  }
+
+  const timeout1 = timeout * 2 / 3
+  const timeout2 = force ? timeout : timeout * 1 / 3
+  if (!force) {
+    log('attempting polite close')
+    try {
+      yield Promise.race([
+        client.end(),
+        wait(timeout1).then(() => {
+          throw new CustomErrors.CloseTimeout(`after ${timeout1}ms`)
+        })
+      ])
+
+      return
+    } catch (err) {
+      if (Errors.matches(err, CustomErrors.CloseTimeout)) {
+        log(`polite close timed out after ${CLOSE_TIMEOUT}ms, forcing`)
+      } else {
+        log('unexpected error on close', err)
+      }
+    }
+  }
+
+  try {
+    log('forcing close')
+    yield Promise.race([
+      client.end(true),
+      wait(timeout2).then(() => {
+        throw new CustomErrors.CloseTimeout(`(forced) after ${timeout2}ms`)
+      })
+    ])
+  } catch (err2) {
+    if (Errors.matches(err2, CustomErrors.CloseTimeout)) {
+      log(`force close timed out after ${timeout2}ms`)
+    } else {
+      log('failed to force close, giving up', err2)
+    }
+  }
+})
+
+const series = co(function* (fns) {
+  for (const fn of fns) {
+    yield fn()
+  }
+})
+
 const utils = module.exports = {
   Promise,
   RESOLVED,
   co,
   promisify,
   post,
-  processResponse,
   genClientId,
   genNonce,
   prettify,
@@ -292,5 +355,8 @@ const utils = module.exports = {
   defer,
   defineGetter,
   isLocalHost,
-  isLocalUrl
+  isLocalUrl,
+  preventConcurrency,
+  closeAwsIotClient,
+  series,
 }

@@ -10,4 +10,7 @@ module.exports = {
   AuthFailed: ex('AuthFailed'),
   FetchTimeout: ex('FetchTimeout'),
   Timeout: ex('Timeout'),
+  ResetButtonPressed: ex('ResetButtonPressed'),
+  ShutdownButtonPressed: ex('ShutdownButtonPressed'),
+  IllegalInvocation: ex('IllegalInvocation'),
 }
