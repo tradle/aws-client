@@ -5,8 +5,8 @@ const crypto = require('crypto')
 const omit = require('lodash/omit')
 const extend = require('lodash/extend')
 const fetch = require('isomorphic-fetch')
+const Errors = require('@tradle/errors')
 const stringify = JSON.stringify.bind(JSON)
-const co = require('co').wrap
 const promisify = require('pify')
 const { AwsSigner } = require('aws-sign-web')
 // const minio = require('minio')
@@ -32,7 +32,7 @@ const redirectTypeErrors = err => {
   throw err
 }
 
-const runWithTimeout = co(function* (fn, timeout) {
+const runWithTimeout = async (fn, timeout) => {
   if (!timeout) {
     return fn()
   }
@@ -43,7 +43,7 @@ const runWithTimeout = co(function* (fn, timeout) {
   })
 
   try {
-    return yield Promise.race([
+    return await Promise.race([
       timeBomb,
       fn(),
     ])
@@ -52,31 +52,33 @@ const runWithTimeout = co(function* (fn, timeout) {
   } finally {
     timeBomb.cancel()
   }
-})
+}
 
 const wrappedFetch = (url, opts={}) => runWithTimeout(
-  () => utils._fetch(url, omit(opts, 'timeout')),
-  opts.timeout,
-).then(processResponse, redirectTypeErrors)
+  () => utils._fetch(url, omit(opts, 'timeout')).catch(redirectTypeErrors),
+  opts.timeout
+)
 
-const post = co(function* ({ url, body, headers={}, timeout }) {
-  return utils.fetch(url, {
+const post = async ({ url, body, headers={}, timeout }) => {
+  const res = await utils.fetch(url, {
     method: 'POST',
     headers: extend({
-      'Accept': 'application/json',
-      'Content-Type': 'application/json'
+     'Accept': 'application/json',
+     'Content-Type': 'application/json'
     }, headers),
-    body: stringify(body),
+    body: JSON.stringify(body),
     timeout,
   })
-})
 
-const processResponse = co(function* (res) {
+  return processResponse(res)
+}
+
+const processResponse = async (res) => {
   if (!res.ok || res.status > 300) {
     throw new Error(res.statusText)
   }
 
-  let text = yield res.text()
+  let text = await res.text()
   const contentType = res.headers.get('content-type') || ''
   if (contentType.startsWith('application/json')) {
     try {
@@ -89,7 +91,7 @@ const processResponse = co(function* (res) {
   }
 
   return text
-})
+}
 
 function genClientId (permalink) {
   return permalink + crypto.randomBytes(20).toString('hex')
@@ -137,11 +139,11 @@ function parsePrefix (prefix) {
   return { bucket, keyPrefix }
 }
 
-const extractAndUploadEmbeds = co(function* (opts) {
+const extractAndUploadEmbeds = async (opts) => {
   const { object, region, credentials } = opts
   const replacements = replaceDataUrls(opts)
   if (replacements.length) {
-    yield Promise.all(replacements.map(replacement => {
+    await Promise.all(replacements.map(replacement => {
       replacement.region = region
       replacement.credentials = credentials
       return uploadToS3(replacement)
@@ -149,13 +151,13 @@ const extractAndUploadEmbeds = co(function* (opts) {
 
     return true
   }
-})
+}
 
 function sha256 (strOrBuffer) {
   return crypto.createHash('sha256').update(strOrBuffer).digest('hex')
 }
 
-const uploadToS3 = co(function* ({
+const uploadToS3 = async ({
   region='us-east-1',
   credentials,
   bucket,
@@ -164,7 +166,7 @@ const uploadToS3 = co(function* ({
   mimetype,
   host,
   s3Url
-}) {
+}) => {
   const signer = new AwsSigner(extend({
     service: 's3',
     region,
@@ -187,21 +189,21 @@ const uploadToS3 = co(function* ({
   }
 
   request.headers = signer.sign(request)
-  return yield utils.fetch(request.url, request)
-})
+  return await utils.fetch(request.url, request)
+}
 
-const download = co(function* ({ url }) {
-  const res = yield utils.fetch(url)
+const download = async ({ url }) => {
+  const res = await utils.fetch(url)
   if (!res.ok || res.status > 300) {
-    const text = yield res.text()
+    const text = await res.text()
     throw new Error(text)
   }
 
-  const arrayBuffer = yield res.arrayBuffer()
+  const arrayBuffer = await res.arrayBuffer()
   const buf = new Buffer(arrayBuffer)
   buf.mimetype = res.headers.get('content-type')
   return buf
-})
+}
 
 const resolveS3Urls = (object, concurrency=10) => {
   return resolveEmbeds({ object, resolve: download, concurrency })
@@ -211,11 +213,12 @@ const assert = (statement, errMsg) => {
   if (!statement) throw new Error(errMsg || 'assertion failed')
 }
 
-const delayThrow = ({ createError, delay }) => {
+const createTimeoutError = delay => new CustomErrors.Timeout(`timed out after ${delay}`)
+const delayThrow = ({ delay, createError=createTimeoutError }) => {
   let cancel
   const promise = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
-      reject(createError())
+      reject(createError(delay))
     }, delay)
 
     cancel = () => {
@@ -263,18 +266,7 @@ const isLocalHost = host => {
   return isIP && IP.isPrivate(host)
 }
 
-const preventConcurrency = fn => {
-  let promise = RESOLVED
-  return co(function* (...args) {
-    try {
-      yield promise
-    } finally {
-      return promise = fn.apply(this, args)
-    }
-  })
-}
-
-const closeAwsIotClient = co(function* ({ client, timeout, force, log=debug }) {
+const closeAwsIotClient = async ({ client, timeout, force, log=debug }) => {
   // temporary catch
   client.handleMessage = (packet, cb) => {
     log('ignoring packet received during close', packet)
@@ -286,17 +278,15 @@ const closeAwsIotClient = co(function* ({ client, timeout, force, log=debug }) {
   if (!force) {
     log('attempting polite close')
     try {
-      yield Promise.race([
-        client.end(),
-        wait(timeout1).then(() => {
-          throw new CustomErrors.CloseTimeout(`after ${timeout1}ms`)
-        })
-      ])
+      await runWithTimeout(() => client.end(), {
+        delay: timeout1,
+        createError: () => new CustomErrors.CloseTimeout(`after ${timeout1}ms`)
+      })
 
       return
     } catch (err) {
       if (Errors.matches(err, CustomErrors.CloseTimeout)) {
-        log(`polite close timed out after ${CLOSE_TIMEOUT}ms, forcing`)
+        log(`polite close timed out after ${timeout1}ms, forcing`)
       } else {
         log('unexpected error on close', err)
       }
@@ -305,12 +295,10 @@ const closeAwsIotClient = co(function* ({ client, timeout, force, log=debug }) {
 
   try {
     log('forcing close')
-    yield Promise.race([
-      client.end(true),
-      wait(timeout2).then(() => {
-        throw new CustomErrors.CloseTimeout(`(forced) after ${timeout2}ms`)
-      })
-    ])
+    await runWithTimeout(() => client.end(true), {
+      delay: timeout2,
+      createError: () => new CustomErrors.CloseTimeout(`(forced) after ${timeout2}ms`),
+    })
   } catch (err2) {
     if (Errors.matches(err2, CustomErrors.CloseTimeout)) {
       log(`force close timed out after ${timeout2}ms`)
@@ -318,18 +306,18 @@ const closeAwsIotClient = co(function* ({ client, timeout, force, log=debug }) {
       log('failed to force close, giving up', err2)
     }
   }
-})
+}
 
-const series = co(function* (fns) {
+const series = async (fns) => {
   for (const fn of fns) {
-    yield fn()
+    const result = fn()
+    if (isPromise(result)) await result
   }
-})
+}
 
 const utils = module.exports = {
   Promise,
   RESOLVED,
-  co,
   promisify,
   post,
   genClientId,
@@ -356,7 +344,6 @@ const utils = module.exports = {
   defineGetter,
   isLocalHost,
   isLocalUrl,
-  preventConcurrency,
   closeAwsIotClient,
   series,
 }

@@ -5,7 +5,11 @@ module.exports = {
     },
     "extends": "eslint:recommended",
     "parserOptions": {
-        "sourceType": "module"
+        "sourceType": "module",
+        "ecmaVersion": 8,
+        "ecmaFeatures": {
+            "experimentalObjectRestSpread": true
+        }
     },
     "rules": {
         "accessor-pairs": "error",
@@ -104,7 +108,7 @@ module.exports = {
         "newline-per-chained-call": "warn",
         "no-alert": "error",
         "no-array-constructor": "error",
-        "no-await-in-loop": "error",
+        "no-await-in-loop": "warn",
         "no-bitwise": "error",
         "no-caller": "error",
         "no-case-declarations": "warn",
@@ -168,8 +172,8 @@ module.exports = {
         "no-restricted-modules": "error",
         "no-restricted-properties": "error",
         "no-restricted-syntax": "error",
-        "no-return-assign": "error",
-        "no-return-await": "error",
+        "no-return-assign": "warn",
+        "no-return-await": "warn",
         "no-script-url": "error",
         "no-self-compare": "error",
         "no-sequences": "error",
@@ -230,7 +234,7 @@ module.exports = {
         "quote-props": "off",
         "quotes": "off",
         "radix": "error",
-        "require-await": "error",
+        "require-await": "warn",
         "require-jsdoc": "off",
         "require-yield": "off",
         "rest-spread-spacing": [

@@ -11,6 +11,6 @@ module.exports = {
   FetchTimeout: ex('FetchTimeout'),
   Timeout: ex('Timeout'),
   ResetButtonPressed: ex('ResetButtonPressed'),
-  ShutdownButtonPressed: ex('ShutdownButtonPressed'),
+  StopButtonPressed: ex('StopButtonPressed'),
   IllegalInvocation: ex('IllegalInvocation'),
 }

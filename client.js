@@ -19,7 +19,6 @@ const {
   Promise,
   RESOLVED,
   assert,
-  co,
   promisify,
   genClientId,
   genNonce,
@@ -36,7 +35,6 @@ const {
   processResponse,
   isLocalUrl,
   isLocalHost,
-  preventConcurrency,
   closeAwsIotClient,
   series,
 } = utils
@@ -59,12 +57,6 @@ const getRetryDelay = err => {
 
   return 5000
 }
-
-const CLOSE_TIMEOUT_ERROR = new CustomErrors.CloseTimeout('close timed out')
-const SEND_TIMEOUT_ERROR = new CustomErrors.SendTimeout('send timed out')
-const CATCH_UP_TIMEOUT_ERROR = new CustomErrors.CatchUpTimeout('catchup timed out')
-const CONNECT_TIMEOUT_ERROR = new CustomErrors.ConnectTimeout('connect timed out')
-const UPLOAD_EMBED_ERROR = new CustomErrors.UploadEmbed('embed failed to upload')
 
 // const EMBEDDED_DATA_URL_REGEX = /\"data:[^/]+\/[^;]+;base64,[^"]*\"/g
 const paths = {
@@ -130,9 +122,43 @@ function Client ({
   this._retryOnSend = retryOnSend
 
   this._isLocalServer = isLocalUrl(this._endpoint)
-  this._name = node.name || counterparty && counterparty.slice(0, 6)
-  this._myEvents = new Ultron(this)
+  this._name = node.name || (counterparty && counterparty.slice(0, 6))
   this.setMaxListeners(0)
+
+  ;[
+    'authenticated',
+    'subscribed',
+    'caughtUp',
+    'resetting',
+    'reset',
+    'connect',
+    'connected',
+    'offline',
+    'disconnect',
+  ].forEach(e => this.on(e, () => this._debug(e)))
+
+  this.on('authenticated', () => this._state.authenticated = true)
+  this.on('subscribed', () => this._state.subscribed = true)
+  this.on('caughtUp', () => this._state.caughtUp = true)
+  this.on('resetting', () => this._state.resetting = true)
+  this.on('reset', () => this._state.resetting = false)
+  this.on('connect', () => this._state.connected = true)
+  this.on('connected', () => this._state.connected = true)
+  this.on('offline', () => this._state.connected = false)
+  this.on('disconnect', () => this._state.connected = false)
+
+  // tmp subscription proxy
+  // gets reinitialize on every reset
+  this._myEvents = new Ultron(this)
+
+  this._startPromise = new Promise(resolve => {
+    this.once('start', resolve)
+  })
+
+  this._stopPromise = new Promise(resolve => {
+    this.once('stop', resolve)
+  })
+
   if (autostart) {
     this.start()
   }
@@ -141,19 +167,19 @@ function Client ({
 util.inherits(Client, EventEmitter)
 const proto = Client.prototype
 
-proto._findPosition = co(function* () {
+proto._findPosition = async function () {
   const promisePosition = Promise.all([
     this._getSendPosition(),
     this._getReceivePosition()
   ])
 
   try {
-    const [sent, received] = yield this._await(promisePosition)
+    const [sent, received] = await this._await(promisePosition)
     this._setPosition({ sent, received })
   } catch (err) {
     this._debug('errored out while getting position', err)
   }
-})
+}
 
 /**
  * wait for "promise" to resolve. Fail if either:
@@ -163,25 +189,25 @@ proto._findPosition = co(function* () {
  * @param {Object} opts
  * @param {Object} opts.timeout
  */
-proto._await = co(function* (promise, opts={}) {
-  const { timeout } = opts
+proto._await = async function (promise, opts={}) {
+  const { timeoutOpts } = opts
   const race = [
     promise,
     this._errorPromise,
   ]
 
-  if (timeout) {
-    race.push(delayThrow(timeout))
+  if (timeoutOpts) {
+    race.push(delayThrow(timeoutOpts))
   }
 
   try {
-    return yield Promise.race(race)
+    return await Promise.race(race)
   } finally {
-    if (timeout) {
+    if (timeoutOpts) {
       race.pop().cancel()
     }
   }
-})
+}
 
 proto._debug = function (...args) {
   if (this._name) {
@@ -208,13 +234,6 @@ proto._unprefixTopic = function (topic) {
   return topic.slice(this._parentTopic.length + 1) // trim slash
 }
 
-// proto.setNode = function (node) {
-//   if (this._node) throw new Error('node already set')
-
-//   this._node = node
-//   this._maybeStart()
-// }
-
 proto._setPosition = function (position) {
   if (this._position) {
     throw new Error('position already set')
@@ -222,7 +241,6 @@ proto._setPosition = function (position) {
 
   this._debug('client position:', prettify(position))
   this._position = position
-  this._maybeStart()
 }
 
 /**
@@ -231,8 +249,7 @@ proto._setPosition = function (position) {
  */
 proto._setCatchUpTarget = function ({ sent, received }) {
   const onCaughtUp = () => {
-    this._debug('all caught up!')
-    this._state.caughtUp = true
+    this.emit('caughtUp')
     this.removeListener('messages', checkIfCaughtUp)
   }
 
@@ -262,40 +279,32 @@ proto._setCatchUpTarget = function ({ sent, received }) {
   }
 }
 
-proto._watchCatchUp = co(function* () {
+proto._watchCatchUp = async function () {
   let error
-  while (!(this._state.canSend || error)) {
+  const loop = async () => {
     let madeProgress
-    let result = yield Promise.race([
+    let result = await Promise.race([
       wait(exports.CATCH_UP_TIMEOUT),
-      this._promiseListen('messages').then(
+      this._awaitEvent('messages').then(
         () => madeProgress = true,
         err => error = err
       )
     ])
 
     // poke server
-    if (!madeProgress) yield this.announcePosition()
+    if (!madeProgress) await this.announcePosition()
+
+    return this._state.canSend || error
   }
-})
 
-// proto.ready = co(function* () {
-//   yield this._loopUntilStateIs({ canSend: true })
-// })
-
-proto._loopUntilStateIs = co(function* (state) {
-  while (!this._state.is(state)) {
-    try {
-      yield this._await(this._state.await(state))
-    } catch (err) {
-      // handled internally
-      this._debug('looping till state is', state)
-    }
+  let stop
+  while (!stop) {
+    stop = await loop()
   }
-})
+}
 
-proto._authStep1 = co(function* () {
-  this._step1Result = yield this._await(utils.post({
+proto._authStep1 = async function () {
+  this._step1Result = await this._await(utils.post({
     url: `${this._endpoint}/${paths.preauth}`,
     body: {
       clientId: this._clientId,
@@ -317,7 +326,7 @@ proto._authStep1 = co(function* () {
 
   this._postProcessAuthResponse(this._step1Result)
   return this._step1Result
-})
+}
 
 proto._postProcessAuthResponse = function (obj) {
   const { accessKey, secretKey, sessionToken, uploadPrefix } = obj
@@ -337,8 +346,8 @@ proto._postProcessAuthResponse = function (obj) {
   }
 }
 
-proto._authStep2 = co(function* () {
-  const signed = yield this._node.sign({
+proto._authStep2 = async function () {
+  const signed = await this._node.sign({
     object: {
       [TYPE]: 'tradle.ChallengeResponse',
       clientId: this._clientId,
@@ -352,7 +361,7 @@ proto._authStep2 = co(function* () {
   })
 
   this._debug('sending challenge response')
-  this._step2Result = yield utils.post({
+  this._step2Result = await utils.post({
     url: `${this._endpoint}/${paths.auth}`,
     body: signed.object,
     timeout: exports.AUTH_TIMEOUT,
@@ -365,9 +374,9 @@ proto._authStep2 = co(function* () {
 
   this._postProcessAuthResponse(this._step2Result)
   return this._step2Result
-})
+}
 
-proto._auth = co(function* () {
+proto._auth = async function () {
   const node = this._node
   const { permalink, identity } = node
   if (!this._clientId) this._clientId = genClientId(permalink)
@@ -385,7 +394,7 @@ proto._auth = co(function* () {
     challenge,
     // timestamp of request hitting server
     time
-  } = yield this._authStep1()
+  } = await this._authStep1()
 
   this._s3Endpoint = s3Endpoint
   if (!iotEndpoint) {
@@ -402,12 +411,9 @@ proto._auth = co(function* () {
     serverEnd: time
   })
 
-  yield this._authStep2()
+  await this._authStep2()
 
-  this._debug('authenticated')
-  this._state.authenticated = true
   // this._authenticated = true
-  this.emit('authenticated')
 
   if (!iotEndpoint) {
     return
@@ -432,7 +438,7 @@ proto._auth = co(function* () {
   this._client.on('error', () => {})
 
   // override to do a manual PUBACK
-  client.handleMessage = this.handleMessage
+  client.handleMessage = this._handleMessage
 
   this._clientEvents = new Ultron(client)
   this._clientEvents.on('connect', this._onconnect)
@@ -450,89 +456,104 @@ proto._auth = co(function* () {
   this._clientEvents.on('reconnect', this._onreconnect)
   this._clientEvents.on('offline', this._onoffline)
   this._clientEvents.on('close', this._onclose)
-  this._clientEvents.once('error', err => {
-    this._fail(err)
-  })
-})
+  this._clientEvents.on('error', this._fail)
+}
 
-proto._promiseListen = function (event) {
+proto._awaitEvent = async function (event) {
+  await this._startPromise
   return this._await(new Promise(resolve => this._myEvents.once(event, resolve)))
 }
 
-proto.reset = co(function* () {
-  this._fail(new CustomErrors.ResetButtonPressed('developer called reset()'))
-})
-
-proto._reset = preventConcurrency(co(function* () {
+proto._reset = async function () {
   this._state = createState()
-  this._state.resetting = true
+  this.emit('resetting')
   this._serverAheadMillis = 0
   this._sending = null
   this._position = null
-  if (this._myEvents) {
-    this._myEvents.remove()
+  if (this._errorPromise && !this._errorPromise.isRejected()) {
+    throw new CustomErrors.IllegalInvocation('_reset() can only be called after a failure')
   }
 
+  let rejection
+  let fail
   this._errorPromise = new Promise((resolve, reject) => {
-    this._fail = (err, skipReset) => {
-      this._debug('resetting due to error', err.stack)
+    fail = this._fail = err => {
+      rejection = err
       reject(err)
     }
   })
 
+  this._errorPromise.catch(err => {
+    this._debug('hit an error', err.stack)
+  })
+
+  this._errorPromise.isRejected = () => !!rejection
+
+  if (this._myEvents) {
+    this._myEvents.remove()
+  }
+
   this._myEvents = new Ultron(this)
-  this._myEvents.on('disconnect', co(function* () {
+  this._myEvents.on('disconnect', async () => {
     const statePromise = this._state.await({ connected: true })
     // if we can't reconnect for a while,
-    // emit error to trigger reset()
+    // throw to trigger reset
     try {
-      yield this._await(statePromise, {
+      await this._await(statePromise, {
         timeoutOpts: {
-          createError: () => {
-            return new CustomErrors.ConnectTimeout(`after ${exports.CONNECT_TIMEOUT}ms`)
-          },
+          createError: () => new CustomErrors.ConnectTimeout(`after ${exports.CONNECT_TIMEOUT}ms`),
           delay: exports.CONNECT_TIMEOUT
         }
       })
     } catch (err) {
       if (Errors.matches(err, CustomErrors.ConnectTimeout)) {
-        this._fail(err)
+        fail(err)
       }
 
       // other errors are handled automatically
     }
-  }).bind(this))
+  })
 
+  await this._cleanUp()
+}
+
+proto._cleanUp = async function () {
+  try {
+    return await this._closeAwsClient()
+  } catch (err) {
+    this._debug('failed to clean up', err)
+  }
+}
+
+proto._closeAwsClient = async function () {
   const client = this._client
-  if (client) {
-    yield closeAwsIotClient({
-      client,
-      timeout: exports.CLOSE_TIMEOUT,
-      force: true,
-      log: this._debug,
-    })
+  if (!client) return
 
-    if (this._clientEvents) {
-      this._clientEvents.remove()
-      this._clientEvents = null
-    }
+  await closeAwsIotClient({
+    client,
+    timeout: exports.CLOSE_TIMEOUT,
+    force: true,
+    log: this._debug,
+  })
 
-    this._client = null
+  if (this._clientEvents) {
+    this._clientEvents.remove()
+    this._clientEvents = null
   }
 
-  this._state.resetting = false
-}))
+  this._client = null
+}
 
-proto.publish = co(function* ({ topic, payload, qos=1 }) {
-  yield this._await(this._state.await({ canPublish: true }))
+proto.publish = async function ({ topic, payload, qos=1 }) {
+  await this._await(this._state.await({ canPublish: true }))
   topic = this._prefixTopic(topic)
   this._debug(`publishing to topic: "${topic}"`)
-  const ret = yield this._client.publish(topic, payload, { qos })
+  const ret = await this._client.publish(topic, payload, { qos })
   this._debug(`published to topic: "${topic}"`)
   return ret
-})
+}
 
-proto._subscribe = co(function* () {
+proto._subscribe = async function () {
   if (!this._client) {
     this._debug('client not set up, cannot subscribe')
     return
@@ -541,34 +562,32 @@ proto._subscribe = co(function* () {
   const topic = this._prefixTopic(`${this._clientId}/sub/+`)
   this._debug(`subscribing to topic: ${topic}`)
   try {
-    yield this._client.subscribe(topic, { qos: 1 })
+    await this._client.subscribe(topic, { qos: 1 })
   } catch (err) {
     this._debug('failed to subscribe')
     this._fail(err)
     return
   }
 
-  this._debug('subscribed')
-  this._state.subscribed = true
   this.emit('subscribed')
-})
+}
 
 proto.onmessage = function () {
   throw new Error('override this method')
 }
 
-proto.handleMessage = co(function* (packet, cb) {
+proto._handleMessage = async function (packet, cb) {
   const { topic, payload } = packet
   try {
-    yield this._handleMessage(this._unprefixTopic(topic.toString()), payload)
+    await this._tryHandleMessage(this._unprefixTopic(topic.toString()), payload)
   } catch (err) {
     this._debug('message handler failed', err)
   } finally {
     if (cb) cb()
   }
-})
+}
 
-proto._handleMessage = co(function* (topic, payload) {
+proto._tryHandleMessage = async function (topic, payload) {
   this._debug(`received "${topic}" event`)
   try {
     payload = IotMessage.decodeRaw(payload)
@@ -577,7 +596,7 @@ proto._handleMessage = co(function* (topic, payload) {
       this._debug(`message travel time: ${(Date.now() - date)}, length: ${payload.body.length}`)
     }
 
-    payload = yield IotMessage.getBody(payload)
+    payload = await IotMessage.getBody(payload)
     payload = JSON.parse(payload)
   } catch (err) {
     this._debug(`received invalid payload, skipping`, payload)
@@ -587,7 +606,7 @@ proto._handleMessage = co(function* (topic, payload) {
   const actualTopic = topic.slice(this._clientId.length + 5) // cut off /sub/
   switch (actualTopic) {
   case 'inbox':
-    yield this._receiveMessages(payload)
+    await this._receiveMessages(payload)
     break
   case 'ack':
     this._receiveAck(payload)
@@ -605,7 +624,7 @@ proto._handleMessage = co(function* (topic, payload) {
   //   this._bringServerUpToDate(payload)
   //   break
   }
-})
+}
 
 proto._receiveAck = function (payload) {
   const { message } = payload
@@ -638,13 +657,13 @@ proto._receiveReject = function (payload) {
   this.emit(`reject:${message.link}`, err)
 }
 
-proto._receiveMessages = co(function* ({ messages }) {
-  messages = yield Promise.all(messages.map(this._processMessage))
+proto._receiveMessages = async function ({ messages }) {
+  messages = await Promise.all(messages.map(this._processMessage))
   this.emit('messages', messages)
   // messages.forEach(message => this.emit('message', message))
-})
+}
 
-proto._processMessage = co(function* (message) {
+proto._processMessage = async function (message) {
   const { recipientPubKey } = message
   if (recipientPubKey) {
     const { pub } = recipientPubKey
@@ -653,17 +672,17 @@ proto._processMessage = co(function* (message) {
     }
   }
 
-  yield resolveEmbeds(message, this._maxRequestConcurrency)
+  await resolveEmbeds(message, this._maxRequestConcurrency)
   const maybePromise = this.onmessage(message)
-  if (isPromise(maybePromise)) yield maybePromise
+  if (isPromise(maybePromise)) await maybePromise
 
   return message
-})
+}
 
-// proto._bringServerUpToDate = co(function* (req) {
+// proto._bringServerUpToDate = async function (req) {
 //   let messages
 //   try {
-//     messages = yield Restore.conversation.respond({
+//     messages = await Restore.conversation.respond({
 //       node: this._node,
 //       req,
 //       sent: true
@@ -674,16 +693,14 @@ proto._processMessage = co(function* (message) {
 
 //   for (const message of messages) {
 //     try {
-//       yield this.send(message)
+//       await this.send(message)
 //     } catch (err) {
 //       this._debug('failed to send message in "restore" batch', err)
 //     }
 //   }
-// })
+// }
 
 proto._onconnect = function () {
-  this._debug('connected')
-  this._state.connected = true
   this.emit('connect')
 }
 
@@ -693,45 +710,41 @@ proto._onreconnect = function () {
 
 proto._onoffline = function () {
   this.emit('offline')
-  this._state.connected = false
-  this._debug('offline')
 }
 
 proto._onclose = function () {
   this.emit('disconnect')
-  this._state.connected = false
-  this._debug('disconnected')
 }
 
-proto.announcePosition = co(function* () {
+proto.announcePosition = async function () {
   if (!this._position) {
-    yield this._await(this._findPosition())
+    await this._await(this._findPosition())
   }
 
-  yield this._await(this.publish({
+  await this._await(this.publish({
     topic: `${this._clientId}/pub/outbox`,
-    payload: yield IotMessage.encode({
+    payload: await IotMessage.encode({
       type: 'announcePosition',
       payload: this._position,
       encoding: 'identity'
     })
   }))
-})
+}
 
-// proto.request = co(function* (restore) {
+// proto.request = async function (restore) {
 //   const { seqs, gt, lt } = restore
 //   return this.publish({
 //     topic: 'restore',
 //     payload: restore
 //   })
-// })
+// }
 
-proto._replaceDataUrls = co(function* (message) {
+proto._replaceDataUrls = async function (message) {
   const copy = Buffer.isBuffer(message)
     ? cloneDeep(message.unserialized.object)
     : cloneDeep(message)
 
-  const changed = yield extractAndUploadEmbeds(extend({
+  const changed = await extractAndUploadEmbeds(extend({
     object: copy,
     region: this._region,
     endpoint: this._s3Endpoint,
@@ -746,12 +759,16 @@ proto._replaceDataUrls = co(function* (message) {
   })
 
   return serialized
-})
+}
 
 // PUBLIC API START
 
+proto.reset = function () {
+  this._fail(new CustomErrors.ResetButtonPressed('developer called reset()'))
+}
+
 // this loops forever (until client is stopped)
-proto.start = co(function* () {
+proto.start = async function () {
   if (this._stopping) {
     throw new CustomErrors.IllegalInvocation('already stopping/stopped, create a new instance please')
   }
@@ -762,39 +779,86 @@ proto.start = co(function* () {
   }
 
   this._running = true
+  this.emit('start')
 
   // used after first iteration
   let err
+  let fail
 
   const steps = [
-    () => this._reset(),
-    () => this._await(this._auth(), { timeoutOpts: exports.AUTH_TIMEOUT }),
-    () => this._await(this._state.await({ canSend: true }), { timeoutOpts: exports.CATCH_UP_TIMEOUT }),
+    async () => {
+      await this._reset()
+      this.emit('reset')
+      fail = this._fail
+    },
+    () => {
+      if (!err) return
+
+      const delay = getRetryDelay(err)
+      err = null
+      return wait(delay)
+    },
+    async () => {
+      await this._await(this._findPosition())
+      this.emit('position')
+    },
+    async () => {
+      await this._await(this._auth(), {
+        timeoutOpts: {
+          delay: exports.AUTH_TIMEOUT,
+          createError: () => new CustomErrors.Timeout('auth timed out'),
+        }
+      })
+      this.emit('authenticated')
+    },
+    async () => {
+      await this._await(this._state.await({ canSend: true }), {
+        timeoutOpts: {
+          delay: exports.CATCH_UP_TIMEOUT,
+          createError: () => {
+            return new CustomErrors.Timeout('catch-up timed out')
+          }
+        }
+      })
+
+      this.emit('ready')
+    },
     // wait to fail and start over
     () => this._errorPromise,
   ]
 
   while (!this._stopping) {
     try {
-      yield series(steps)
-    } catch (err) {
-      this._debug('resetting main loop due to error', err)
-      const millis = getRetryDelay(err)
-      if (millis) yield wait(millis)
+      await series(steps)
+    } catch (e) {
+      err = e
+      fail(err)
+      if (TESTING) {
+        Errors.rethrow(err, 'developer')
+      }
+
+      this._debug('resetting main loop')
+      if (this._stopping) break
     }
   }
-})
 
-proto.stop = co(function* (force) {
+  await this._reset()
+  this.emit('stop')
+}
+
+proto.stop = async function (force) {
+  if (!this._running) throw new CustomErrors.IllegalInvocation('not running!')
+
   this._stopping = true
   this._fail(new CustomErrors.StopButtonPressed('developer stopped me'))
-})
+  await this._stopPromise
+}
 
 proto.now = function () {
   return Date.now() + this._serverAheadMillis
 }
 
-proto.send = co(function* ({ message, link, timeout=exports.SEND_TIMEOUT }) {
+proto.send = async function ({ message, link, timeout=exports.SEND_TIMEOUT }) {
   let attemptsLeft = getAttemptsLeft(this._retryOnSend)
   let err
   let sendPromise
@@ -804,15 +868,14 @@ proto.send = co(function* ({ message, link, timeout=exports.SEND_TIMEOUT }) {
 
     iterationStart = Date.now()
     try {
-      yield this._await(this._state.await({ canSend: true }), {
+      await this._await(this._state.await({ canSend: true }), {
         timeoutOpts: {
           delay: timeout,
-          createError: () => new CustomErrors.SendTimeout('timed out waiting for send prerequisites')
+          createError: () => new CustomErrors.SendTimeout('timed out waiting for send prerequisites'),
         }
       })
 
-      sendPromise = this._send({ message, link, timeout })
-      return yield this._await(sendPromise)
+      return await this._await(this._send({ message, link, timeout }))
     } catch (e) {
       Errors.rethrow(e, 'developer')
       timeout -= (Date.now() - iterationStart)
@@ -821,18 +884,18 @@ proto.send = co(function* ({ message, link, timeout=exports.SEND_TIMEOUT }) {
   }
 
   throw err
-})
+}
 
 // PUBLIC API END
 
-proto._send = co(function* ({ message, link, timeout }) {
+proto._send = async function ({ message, link, timeout }) {
   if (this._sending) {
     throw new Error('send one message at a time!')
   }
 
   if (this._uploadPrefix) {
     try {
-      message = yield this._replaceDataUrls(message)
+      message = await this._replaceDataUrls(message)
     } catch (err) {
       // trigger reset
       this._fail(new CustomErrors.UploadEmbed(err.message))
@@ -856,7 +919,7 @@ proto._send = co(function* ({ message, link, timeout }) {
   const send = useHttp ? this._sendHTTP : this._sendMQTT
   this._sending = link
   try {
-    return yield send({
+    return await send({
       message: message.unserialized.object,
       link,
       timeoutOpts: {
@@ -872,9 +935,9 @@ proto._send = co(function* ({ message, link, timeout }) {
 
     this._sending = null
   }
-})
+}
 
-proto._sendHTTP = co(function* ({ message, link, timeoutOpts }) {
+proto._sendHTTP = async function ({ message, link, timeoutOpts }) {
   this._debug('sending over HTTP')
   const url = `${this._endpoint}/${paths.inbox}`
   const headers = {
@@ -884,7 +947,7 @@ proto._sendHTTP = co(function* ({ message, link, timeoutOpts }) {
 
   let payload = stringify({ messages: [message] })
   if (!this._isLocalServer) {
-    payload = yield this._await(zlib.gzip(payload))
+    payload = await this._await(zlib.gzip(payload))
     headers['Content-Encoding'] = 'gzip'
   }
 
@@ -894,16 +957,16 @@ proto._sendHTTP = co(function* ({ message, link, timeoutOpts }) {
     body: payload
   })
 
-  yield this._await(promise, { timeoutOpts })
-})
+  await this._await(promise, { timeoutOpts })
+}
 
-proto._sendMQTT = co(function* ({ message, link, timeoutOpts }) {
+proto._sendMQTT = async function ({ message, link, timeoutOpts }) {
   this._debug('sending over MQTT')
   if (this._sendMQTTSession) {
     this._sendMQTTSession.destroy()
   }
 
-  const payload = yield this._await(IotMessage.encode({
+  const payload = await this._await(IotMessage.encode({
     payload: [message],
     encoding: 'gzip'
   }))
@@ -921,9 +984,9 @@ proto._sendMQTT = co(function* ({ message, link, timeoutOpts }) {
     payload
   })
 
-  yield this._await(Promise.all([promisePublish, promiseAck]), { timeoutOpts })
+  await this._await(Promise.all([promisePublish, promiseAck]), { timeoutOpts })
   this._debug('delivered message!')
-})
+}
 
 const getAttemptsLeft = retries => {
   if (typeof retries === 'number') return retries

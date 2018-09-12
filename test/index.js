@@ -1,4 +1,3 @@
-const nock = require('nock')
 const zlib = require('zlib')
 const { EventEmitter } = require('events')
 const _ = require('lodash')
@@ -24,16 +23,31 @@ const {
 const endpoint = 'https://my.aws.api.gateway.endpoint'
 const Client = require('../')
 const sampleIdentity = require('./fixtures/identity')
-const loudCo = gen => {
-  return co(function* (...args) {
-    try {
-      yield co(gen).apply(this, args)
-    } catch (err) {
-      console.error(err)
-      throw err
-    }
-  })
+const loudAsync = fn => async function (...args) {
+  try {
+    await fn.apply(this, args)
+  } catch (err) {
+    console.error(err)
+    throw err
+  }
 }
+
+const loudCo = gen => co(function* (...args) {
+  try {
+    yield co(gen).apply(this, args)
+  } catch (err) {
+    console.error(err)
+    throw err
+  }
+})
+
+const awaitReady = client => {
+  if (client._state.ready) return Promise.resolve()
+
+  return listenOnce(client, 'ready')
+}
+
+const listenOnce = (emitter, event) => new Promise(resolve => emitter.once(event, resolve))
 
 sinon
   .stub(utils, 'serializeMessage')
@@ -63,18 +77,18 @@ const sendFixture = {
   link: messageLink
 }
 
-test('fetch with timeout', loudCo(function* (t) {
+test('fetch with timeout', loudAsync(async (t) => {
   const clock = sinon.useFakeTimers()
-  const fetchStub = sinon.stub(utils, '_fetch').callsFake(co(function* () {
+  const fetchStub = sinon.stub(utils, '_fetch').callsFake(async () => {
     clock.tick(100)
     return {
       ok: true,
       status: 200
     }
-  }))
+  })
 
   try {
-    yield utils.fetch('http://abc.123', { timeout: 50 })
+    await utils.fetch('http://abc.123', { timeout: 50 })
     t.fail('expected timeout')
   } catch (err) {
     t.ok(/timed out/.test(err.message), 'fetch aborted after timeout')
@@ -82,7 +96,7 @@ test('fetch with timeout', loudCo(function* (t) {
 
   const uncaughtRejectionHandler = t.fail
   process.on('uncaughtRejection', uncaughtRejectionHandler)
-  yield utils.fetch('http://abc.123', { timeout: 200 })
+  await utils.fetch('http://abc.123', { timeout: 200 })
   clock.tick(200)
   process.removeListener('uncaughtRejection', uncaughtRejectionHandler)
   t.pass('timer canceled')
@@ -92,7 +106,7 @@ test('fetch with timeout', loudCo(function* (t) {
   t.end()
 }))
 
-test('resolve embeds', loudCo(function* (t) {
+test('resolve embeds', loudAsync(async (t) => {
   const s3Url = 'https://mybucket.s3.amazonaws.com/mykey'
   const object = {
     blah: {
@@ -106,6 +120,8 @@ test('resolve embeds', loudCo(function* (t) {
     .callsFake(function (url) {
       t.equal(url, s3Url)
       return Promise.resolve({
+        ok: true,
+        status: 200,
         headers: {
           get: header => {
             if (header === 'content-type') {
@@ -117,7 +133,7 @@ test('resolve embeds', loudCo(function* (t) {
       })
     })
 
-  yield utils.resolveEmbeds(object)
+  await utils.resolveEmbeds(object)
   t.same(object, {
     blah: {
       habla: dataUri
@@ -129,7 +145,7 @@ test('resolve embeds', loudCo(function* (t) {
   t.end()
 }))
 
-test.skip('upload to s3', loudCo(function* (t) {
+test.skip('upload to s3', loudAsync(async (t) => {
   let {
     accessKey,
     secretKey,
@@ -138,7 +154,7 @@ test.skip('upload to s3', loudCo(function* (t) {
     // timestamp of request hitting server
     time,
     uploadPrefix
-  } = yield post(
+  } = await post(
     'https://7hixz15a6k.execute-api.us-east-1.amazonaws.com/dev/tradle/preauth',
     {
       clientId: genClientId(sampleIdentity.permalink),
@@ -166,19 +182,11 @@ test.skip('upload to s3', loudCo(function* (t) {
     body: dataUrls[0].body.toString('base64')
   }, credentials), null, 2))
 
-  // nock(dataUrls[0].s3Url)
-  //   .put(function (url) {
-  //     debugger
-  //     console.log(url)
-  //     return true
-  //   })
-  //   .reply(200)
-
-  yield uploadToS3(_.extend(dataUrls[0], { credentials }))
+  await uploadToS3(_.extend(dataUrls[0], { credentials }))
   t.end()
 }))
 
-test('init, auth', loudCo(function* (t) {
+test('init, auth', loudAsync(async (t) => {
   const node = fakeNode()
   const { permalink, identity } = node
 
@@ -208,14 +216,14 @@ test('init, auth', loudCo(function* (t) {
     return new EventEmitter()
   })
 
-  const stubTip = sinon.stub(utils, 'getTip').callsFake(co(function* () {
+  const stubTip = sinon.stub(utils, 'getTip').callsFake(async () => {
     return 0
-  }))
+  })
 
-  const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
+  const stubPost = sinon.stub(utils, 'post').callsFake(async ({ url, body }) => {
     if (step++ === 0) {
-      t.equal(data.clientId, clientId)
-      t.equal(data.identity, identity)
+      t.equal(body.clientId, clientId)
+      t.equal(body.identity, identity)
       t.equal(url, `${endpoint}/preauth`)
       return preauthResp
     }
@@ -223,7 +231,7 @@ test('init, auth', loudCo(function* (t) {
     t.equal(step, 2)
     t.equal(url, `${endpoint}/auth`)
     return authResp
-  }))
+  })
 
   const clientId = permalink.repeat(2)
   const client = new Client({
@@ -238,7 +246,9 @@ test('init, auth', loudCo(function* (t) {
     throw err
   })
 
-  yield client._promiseListen('authenticated')
+  await listenOnce(client, 'authenticated')
+
+  await client.stop()
 
   stubDevice.restore()
   stubPost.restore()
@@ -246,7 +256,7 @@ test('init, auth', loudCo(function* (t) {
   t.end()
 }))
 
-test('catch up with server position before sending', loudCo(function* (t) {
+test('catch up with server position before sending', loudAsync(async (t) => {
   const node = fakeNode()
   const { permalink, identity } = node
   const clientId = permalink.repeat(2)
@@ -256,7 +266,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
   let delivered = false
   let closed = false
 
-  const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
+  const stubPost = sinon.stub(utils, 'post').callsFake(async ({ url, body }) => {
     if (/preauth/.test(url)) {
       return {
         challenge: 'abc',
@@ -269,7 +279,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
     return _.extend(getDefaultAuthResponse(), {
       position: serverPos,
     })
-  }))
+  })
 
   const fakeMqttClient = new EventEmitter()
   fakeMqttClient.end = (force, cb) => {
@@ -277,7 +287,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
   }
 
   const stubDevice = sinon.stub(awsIot, 'device').returns(fakeMqttClient)
-  fakeMqttClient.publish = co(function* (topic, payload, opts, cb) {
+  fakeMqttClient.publish = async (topic, payload, opts, cb) => {
     t.equal(subscribed, true)
     t.equal(published, false)
     published = true
@@ -285,22 +295,21 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
     // artificially delay
     // to check that send() waits for ack
-    yield wait(100)
+    await wait(100)
     delivered = true
     cb()
-    yield wait(100)
+    await wait(100)
     fakeMqttClient.handleMessage({
       topic: `${iotParentTopic}/${clientId}/sub/ack`,
-      payload: yield encodePayload({
+      payload: await encodePayload({
         message: {
           link: messageLink
         }
       })
     })
-  })
+  }
 
   fakeMqttClient.subscribe = function (topics, opts, cb) {
-    t.equal(subscribed, false)
     t.same(topics, `${iotParentTopic}/${clientId}/sub/+`)
     subscribed = true
     cb()
@@ -363,16 +372,16 @@ test('catch up with server position before sending', loudCo(function* (t) {
   Client.CATCH_UP_TIMEOUT = 500
 
   let sentAnnounce
-  const publishStub = sinon.stub(client, 'publish').callsFake(co(function* ({ topic, payload }) {
-    const { type } = yield IotMessage.decodeRaw(payload)
+  const publishStub = sinon.stub(client, 'publish').callsFake(async ({ topic, payload }) => {
+    const { type } = await IotMessage.decodeRaw(payload)
     t.equal(type, IotMessage.protobuf.MessageType.announcePosition)
-  }))
+  })
 
-  yield wait(100)
+  await wait(100)
   client.removeListener('ready', t.fail)
   const promiseSend = client.send(sendFixture)
   try {
-    yield Promise.race([
+    await Promise.race([
       promiseSend,
       timeoutIn(500)
     ])
@@ -382,7 +391,7 @@ test('catch up with server position before sending', loudCo(function* (t) {
     t.ok(/timed out/.test(err.message))
   }
 
-  yield wait(100)
+  await wait(100)
   t.equal(publishStub.callCount, 1)
   publishStub.restore()
 
@@ -390,16 +399,16 @@ test('catch up with server position before sending', loudCo(function* (t) {
 
   fakeMqttClient.handleMessage({
     topic: `${iotParentTopic}/${clientId}/sub/inbox`,
-    payload: yield encodePayload({
+    payload: await encodePayload({
       messages: [serverSentMessage]
     })
   })
 
-  yield client.ready()
-  yield promiseSend
+  await awaitReady(client)
+  await promiseSend
 
   t.equal(delivered, true)
-  yield client.close()
+  await client.stop()
 
   t.equal(closed, true)
 
@@ -408,14 +417,14 @@ test('catch up with server position before sending', loudCo(function* (t) {
   t.end()
 }))
 
-test('reset on error', loudCo(function* (t) {
+test('reset on error', loudAsync(async (t) => {
   const node = fakeNode()
   const { permalink, identity } = node
   const clientId = permalink.repeat(2)
 
   let preauthCount = 0
   let authCount = 0
-  const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
+  const stubPost = sinon.stub(utils, 'post').callsFake(async ({ url, body }) => {
     if (/preauth/.test(url)) {
       preauthCount++
       return {
@@ -428,7 +437,7 @@ test('reset on error', loudCo(function* (t) {
 
     authCount++
     return getDefaultAuthResponse()
-  }))
+  })
 
   const fakeMqttClient = new EventEmitter()
   fakeMqttClient.subscribe = function (topics, opts, cb) {
@@ -446,9 +455,9 @@ test('reset on error', loudCo(function* (t) {
   }
 
   const stubDevice = sinon.stub(awsIot, 'device').returns(fakeMqttClient)
-  const stubTip = sinon.stub(utils, 'getTip').callsFake(co(function* () {
+  const stubTip = sinon.stub(utils, 'getTip').callsFake(async () => {
     // return
-  }))
+  })
 
   let forcedClose = false
   let triedClose = false
@@ -464,15 +473,18 @@ test('reset on error', loudCo(function* (t) {
     process.nextTick(() => fakeMqttClient.emit('connect'))
   })
 
-  yield client.ready()
+  await awaitReady(client)
   t.equal(preauthCount, 1)
   t.equal(authCount, 1)
   fakeMqttClient.emit('error', new Error('crap'))
+  await wait(0)
   t.equal(forcedClose, true)
 
-  yield client.ready()
+  await awaitReady(client)
   t.equal(preauthCount, 2)
   t.equal(authCount, 2)
+
+  await client.stop()
 
   stubDevice.restore()
   stubPost.restore()
@@ -481,7 +493,7 @@ test('reset on error', loudCo(function* (t) {
 }))
 
 ;[false, true].forEach(retryOnSend => {
-  test(`retryOnSend (${retryOnSend})`, loudCo(function* (t) {
+  test(`retryOnSend (${retryOnSend})`, loudAsync(async (t) => {
     const node = fakeNode()
     const { permalink, identity } = node
     const bucket = 'mybucket'
@@ -490,7 +502,7 @@ test('reset on error', loudCo(function* (t) {
     let authStep1Failed
     let authStep2Failed
     let subscribeFailed
-    let replaceEmbedsFailed
+    // let replaceEmbedsFailed
     let publishFailed
 
     const clientId = permalink.repeat(2)
@@ -519,18 +531,18 @@ test('reset on error', loudCo(function* (t) {
 
     fakeMqttClient.publish = (topic, payload, opts, cb) => {
       if (publishFailed) {
-        return process.nextTick(co(function* () {
+        return process.nextTick(async () => {
           cb()
-          yield wait(100)
+          await wait(100)
           fakeMqttClient.handleMessage({
             topic: `${iotParentTopic}/${clientId}/sub/ack`,
-            payload: yield encodePayload({
+            payload: await encodePayload({
               message: {
                 link: messageLink
               }
             })
           })
-        }))
+        })
       }
 
       publishFailed = true
@@ -540,7 +552,7 @@ test('reset on error', loudCo(function* (t) {
     fakeMqttClient.end = (force, cb) => process.nextTick(cb || force)
 
     const stubDevice = sinon.stub(awsIot, 'device').returns(fakeMqttClient)
-    const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
+    const stubPost = sinon.stub(utils, 'post').callsFake(async ({ url, body }) => {
       if (/preauth/.test(url)) {
         if (!authStep1Failed) {
           authStep1Failed = true
@@ -563,54 +575,54 @@ test('reset on error', loudCo(function* (t) {
       return _.extend(getDefaultAuthResponse(), {
         uploadPrefix: `${bucket}/${keyPrefix}`
       })
-    }))
+    })
 
-    const stubReplaceEmbeds = sinon.stub(client, '_replaceDataUrls').callsFake(co(function* (message) {
-      if (!replaceEmbedsFailed) {
-        replaceEmbedsFailed = true
-        throw new Error('replace embeds failed (test)')
-      }
+    // const stubReplaceEmbeds = sinon.stub(client, '_replaceDataUrls').callsFake(async (message) => {
+    //   if (!replaceEmbedsFailed) {
+    //     replaceEmbedsFailed = true
+    //     throw new Error('replace embeds failed (test)')
+    //   }
 
-      return message
-    }))
+    //   return message
+    // })
 
     if (retryOnSend) {
-      yield client.send(sendFixture)
+      await client.send(sendFixture)
     } else {
-      // try {
-      //   yield client.send(sendFixture)
-      // } catch (err) {
-      //   t.ok(/auth step 1/.test(err.message))
-      // }
-
-      // try {
-      //   yield client.send(sendFixture)
-      // } catch (err) {
-      //   t.ok(/auth step 2/.test(err.message))
-      // }
-
-      // commented out because "subscribed" is not a prereq to sending
-      // try {
-      //   yield client.send(sendFixture)
-      // } catch (err) {
-      //   t.ok(/subscribe/.test(err.message))
-      // }
-
       try {
-        yield client.send(sendFixture)
+        await client.send(sendFixture)
       } catch (err) {
-        console.log(err.stack)
-        t.ok(/replace embeds/.test(err.message))
+        t.ok(/auth step 1/.test(err.message))
       }
 
       try {
-        yield client.send(sendFixture)
+        await client.send(sendFixture)
+      } catch (err) {
+        t.ok(/auth step 2/.test(err.message))
+      }
+
+      try {
+        await client.send(sendFixture)
+      } catch (err) {
+        t.ok(/subscribe/.test(err.message))
+      }
+
+      // try {
+      //   await client.send(sendFixture)
+      // } catch (err) {
+      //   t.ok(/replace embeds/.test(err.message))
+      // }
+
+      try {
+        await client.send(sendFixture)
       } catch (err) {
         t.ok(/publish/.test(err.message))
       }
 
-      yield client.send(sendFixture)
+      await client.send(sendFixture)
     }
+
+    await client.stop()
 
     stubDevice.restore()
     stubPost.restore()
@@ -618,16 +630,16 @@ test('reset on error', loudCo(function* (t) {
   }))
 })
 
-test('upload', loudCo(function* (t) {
+test('upload', loudAsync(async (t) => {
   const node = fakeNode()
   const { permalink, identity } = node
-  const stubTip = sinon.stub(utils, 'getTip').callsFake(co(function* () {
+  const stubTip = sinon.stub(utils, 'getTip').callsFake(async () => {
     return 0
-  }))
+  })
 
   const bucket = 'mybucket'
   const keyPrefix = 'mykeyprefix'
-  const stubPost = sinon.stub(utils, 'post').callsFake(co(function* (url, data) {
+  const stubPost = sinon.stub(utils, 'post').callsFake(async ({ url, body }) => {
     if (/preauth/.test(url)) {
       return {
         time: Date.now(),
@@ -643,7 +655,7 @@ test('upload', loudCo(function* (t) {
     return _.extend(getDefaultAuthResponse(), {
       uploadPrefix: `${bucket}/${keyPrefix}`
     })
-  }))
+  })
 
   const fakeMqttClient = new EventEmitter()
   fakeMqttClient.subscribe = (topics, opts, cb) => {
@@ -664,18 +676,18 @@ test('upload', loudCo(function* (t) {
     process.nextTick(() => fakeMqttClient.emit('connect'))
   })
 
-  yield client.ready()
+  await awaitReady(client)
 
   const url = `https://${bucket}.s3.amazonaws.com/${keyPrefix}a30f31a6a61325012e8c25deb3bd9b59dc9a2b4350b2b18e3c02dca9a87fea0b`
-  client._sendMQTT = co(function* ({ message, link }) {
+  client._sendMQTT = async ({ message, link }) => {
     t.equal(message.object.photo, `${PREFIX.unsigned}${url}`)
     t.end()
     return Promise.resolve()
-  })
+  }
 
   const stubFetch = sinon
     .stub(utils, 'fetch')
-    .callsFake(co(function* (putUrl, request) {
+    .callsFake(async (putUrl, request) => {
       t.equal(request.method, 'PUT')
       t.equal(putUrl, url)
       t.same(request.body, new Buffer('ffd8ffe000104a46494600010100000100010000', 'hex'))
@@ -693,7 +705,7 @@ test('upload', loudCo(function* (t) {
       }
 
       return res
-    }))
+    })
 
   const message = {
     [TYPE]: 'tradle.Message',
@@ -709,10 +721,12 @@ test('upload', loudCo(function* (t) {
     object: message
   }
 
-  yield client.send({
+  await client.send({
     message: serialized,
     link: 'abc'
   })
+
+  await client.stop()
 
   // stubFetch.restore()
   stubDevice.restore()
@@ -792,3 +806,7 @@ function getDefaultAuthResponse () {
     }
   })
 }
+
+// process.on('unhandledRejection', (...args) => {
+//   throw args[0]
+// })

@@ -9,9 +9,10 @@ module.exports = function createConnectionState () {
     authenticated: false,
     connected: false,
     subscribed: false,
-    caughtUp: false
+    caughtUp: false,
   })
 
+  defineGetter(state, 'ready', () => state.canSend)
   defineGetter(state, 'canSend', () => state.caughtUp && state.canPublish)
   defineGetter(state, 'canPublish', () => state.connected)
   return state
