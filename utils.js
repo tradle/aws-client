@@ -278,11 +278,7 @@ const closeAwsIotClient = async ({ client, timeout, force, log=debug }) => {
   if (!force) {
     log('attempting polite close')
     try {
-      await runWithTimeout(() => client.end(), {
-        delay: timeout1,
-        createError: () => new CustomErrors.CloseTimeout(`after ${timeout1}ms`)
-      })
-
+      await runWithTimeout(() => client.end(), timeout1)
       return
     } catch (err) {
       if (Errors.matches(err, CustomErrors.CloseTimeout)) {
@@ -295,10 +291,7 @@ const closeAwsIotClient = async ({ client, timeout, force, log=debug }) => {
 
   try {
     log('forcing close')
-    await runWithTimeout(() => client.end(true), {
-      delay: timeout2,
-      createError: () => new CustomErrors.CloseTimeout(`(forced) after ${timeout2}ms`),
-    })
+    await runWithTimeout(() => client.end(true), timeout2)
   } catch (err2) {
     if (Errors.matches(err2, CustomErrors.CloseTimeout)) {
       log(`force close timed out after ${timeout2}ms`)
