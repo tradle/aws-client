@@ -1,1 +1,2 @@
-module.exports = require('debug')(require('./package.json').name)
+const { name, version } = require('./package.json')
+module.exports = require('debug')(`${name}@${version}`)
