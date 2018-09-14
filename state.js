@@ -1,14 +1,18 @@
 const { EventEmitter } = require('events')
 const clone = require('lodash/clone')
+const cloneDeep = require('lodash/cloneDeep')
+const partition = require('lodash/partition')
 const {
-  RESOLVED
+  Promise,
+  RESOLVED,
 } = require('./utils')
 
 module.exports = function createState (initial) {
-  const waiting = []
+  let waiting = []
   const internal = clone(initial)
   const myState = new EventEmitter()
 
+  myState.toJSON = () => cloneDeep(internal)
   myState.is = state => {
     return Object.keys(state).every(prop => myState[prop] === state[prop])
   }
@@ -24,15 +28,9 @@ module.exports = function createState (initial) {
   }
 
   myState.on('change', function () {
-    let i = waiting.length
-    while (i--) {
-      let { state, resolve } = waiting[i]
-      if (myState.is(state)) {
-        // remove
-        waiting.pop()
-        resolve()
-      }
-    }
+    const [done, notYet] = partition(waiting, ({ state }) => myState.is(state))
+    waiting = notYet
+    done.forEach(waiter => waiter.resolve())
   })
 
   Object.keys(internal).forEach(prop => {

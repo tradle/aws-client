@@ -122,7 +122,7 @@ function Client ({
   this._retryOnSend = retryOnSend
 
   this._isLocalServer = isLocalUrl(this._endpoint)
-  this._name = node.name || (counterparty && counterparty.slice(0, 6))
+  this._name = node.name || (counterparty && counterparty.slice(0, 6)) || ''
   this.setMaxListeners(0)
 
   // not very efficient to have so many listeners
@@ -137,7 +137,7 @@ function Client ({
     'connected',
     'offline',
     'disconnect',
-  ].forEach(e => this.on(e, () => this._debug(e)))
+  ].forEach(e => this.on(e, () => this._debug(`event: ${e}`)))
 
   this.on('authenticated', () => this._state.authenticated = true)
   this.on('subscribed', () => this._state.subscribed = true)
@@ -266,20 +266,24 @@ proto._setCatchUpTarget = function ({ sent, received }) {
   }
 
   if (!sent) {
-    return onCaughtUp()
+    onCaughtUp()
+    return
   }
 
   const pos = this._position.received
-  if (!(pos && checkIfCaughtUp([pos]))) {
-    this._debug(`waiting for message: ${prettify(sent)}`)
-    this._myEvents.on('messages', checkIfCaughtUp)
-    this._watchCatchUp()
-  }
+  if (pos && checkIfCaughtUp([pos])) return
+
+  this._debug(`waiting for message: ${prettify(sent)}`)
+  this._myEvents.on('messages', checkIfCaughtUp)
+  this._watchCatchUp().catch(err => {
+    Errors.rethrow(err, 'developer')
+    // otherwise, this is handled by the errorPromise listener
+  })
 }
 
 proto._watchCatchUp = async function () {
   let error
-  const loop = async () => {
+  const waitForCatchUp = async () => {
     let madeProgress
     let result = await Promise.race([
       wait(exports.CATCH_UP_TIMEOUT),
@@ -290,14 +294,14 @@ proto._watchCatchUp = async function () {
     ])
 
     // poke server
-    if (!madeProgress) await this.announcePosition()
+    if (!madeProgress) await this._announcePosition()
 
     return this._state.canSend || error
   }
 
   let stop
   while (!stop) {
-    stop = await loop()
+    stop = await waitForCatchUp()
   }
 }
 
@@ -527,6 +531,7 @@ proto._closeAwsClient = async function () {
   const client = this._client
   if (!client) return
 
+  this._debug('closing wrapped aws iot client')
   await closeAwsIotClient({
     client,
     timeout: exports.CLOSE_TIMEOUT,
@@ -546,7 +551,7 @@ proto.publish = async function ({ topic, payload, qos=1 }) {
   await this._await(this._state.await({ canPublish: true }))
   topic = this._prefixTopic(topic)
   this._debug(`publishing to topic: "${topic}"`)
-  const ret = await this._client.publish(topic, payload, { qos })
+  const ret = await this._await(this._client.publish(topic, payload, { qos }))
   this._debug(`published to topic: "${topic}"`)
   return ret
 }
@@ -575,9 +580,12 @@ proto.onmessage = function () {
 }
 
 proto._handleMessage = async function (packet, cb) {
-  const { topic, payload } = packet
   try {
-    await this._tryHandleMessage(this._unprefixTopic(topic.toString()), payload)
+    const { topic, payload } = packet
+    const shortTopic = this._unprefixTopic(topic.toString())
+    // to make sure setCatchUpTarget doesn't get confused
+    await this._await(this._state.await({ authenticated: true }))
+    await this._await(this._tryHandleMessage(shortTopic, payload))
   } catch (err) {
     this._debug('message handler failed', err)
   } finally {
@@ -714,19 +722,17 @@ proto._onclose = function () {
   this.emit('disconnect')
 }
 
-proto.announcePosition = async function () {
-  if (!this._position) {
-    await this._await(this._findPosition())
-  }
-
-  await this._await(this.publish({
+proto._announcePosition = async function () {
+  await this._await(this._state.await({ authenticated: true }))
+  this._debug('announcing position')
+  await this.publish({
     topic: `${this._clientId}/pub/outbox`,
     payload: await IotMessage.encode({
       type: 'announcePosition',
       payload: this._position,
       encoding: 'identity'
     })
-  }))
+  })
 }
 
 // proto.request = async function (restore) {
@@ -784,33 +790,43 @@ proto.start = async function () {
   let fail
 
   const steps = [
-    async () => {
-      await this._reset()
-      this.emit('reset')
-      fail = this._fail
+    {
+      name: 'reset',
+      event: 'reset',
+      fn: async () => {
+        await this._reset()
+        fail = this._fail
+      }
     },
-    () => {
-      if (!err) return
+    {
+      name: 'backoff (maybe)',
+      fn: () => {
+        if (!err) return
 
-      const delay = getRetryDelay(err)
-      err = null
-      return wait(delay)
+        const delay = getRetryDelay(err)
+        err = null
+        return wait(delay)
+      }
     },
-    async () => {
-      await this._await(this._findPosition())
-      this.emit('position')
+    {
+      name: 'get my position',
+      event: 'position',
+      fn: () => this._await(this._findPosition())
     },
-    async () => {
-      await this._await(this._auth(), {
+    {
+      name: 'auth',
+      event: 'authenticated',
+      fn: () => this._await(this._auth(), {
         timeoutOpts: {
           delay: exports.AUTH_TIMEOUT,
           createError: () => new CustomErrors.Timeout('auth timed out'),
         }
       })
-      this.emit('authenticated')
     },
-    async () => {
-      await this._await(this._state.await({ canSend: true }), {
+    {
+      name: 'catch up with server',
+      event: 'ready',
+      fn: () => this._await(this._state.await({ canSend: true }), {
         timeoutOpts: {
           delay: exports.CATCH_UP_TIMEOUT,
           createError: () => {
@@ -818,26 +834,37 @@ proto.start = async function () {
           }
         }
       })
-
-      this.emit('ready')
     },
     // wait to fail and start over
-    () => this._errorPromise,
+    {
+      name: 'chill out till the next crisis',
+      fn: () => this._errorPromise
+    },
   ]
 
-  while (!this._stopping) {
+  const runSteps = async () => {
+    let currentStepName
     try {
-      await series(steps)
+      for (const { name, event, fn } of steps) {
+        currentStepName = name
+        // this._debug(`step start: ${name}`)
+        const result = fn()
+        if (isPromise(result)) await result
+        if (event) this.emit(event)
+        // this._debug(`step end: ${name}`)
+      }
     } catch (e) {
+      this._debug(`step failed: ${currentStepName}, resetting main loop`)
       err = e
       fail(err)
       if (TESTING) {
         Errors.rethrow(err, 'developer')
       }
-
-      this._debug('resetting main loop')
-      if (this._stopping) break
     }
+  }
+
+  while (!this._stopping) {
+    await runSteps()
   }
 
   await this._reset()
@@ -859,9 +886,10 @@ proto.now = function () {
 proto.send = async function ({ message, link, timeout=exports.SEND_TIMEOUT }) {
   let attemptsLeft = getAttemptsLeft(this._retryOnSend)
   let err
-  let sendPromise
   let iterationStart
+
   while (attemptsLeft-- > 0 && timeout > 0) {
+    let state = this._state
     if (err) this._debug('retrying send')
 
     iterationStart = Date.now()

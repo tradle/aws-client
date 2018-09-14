@@ -9,7 +9,6 @@ const Errors = require('@tradle/errors')
 const stringify = JSON.stringify.bind(JSON)
 const promisify = require('pify')
 const { AwsSigner } = require('aws-sign-web')
-// const minio = require('minio')
 const { serializeMessage } = require('@tradle/engine').utils
 const {
   replaceDataUrls,
@@ -47,8 +46,6 @@ const runWithTimeout = async (fn, timeout) => {
       timeBomb,
       fn(),
     ])
-  } catch (err) {
-    throw err
   } finally {
     timeBomb.cancel()
   }
@@ -118,7 +115,6 @@ function getTip ({ node, counterparty, sent }) {
   seqOpts.lte = base + '\xff'
   seqOpts.reverse = true
   seqOpts.limit = 1
-  // console.log(seqOpts)
   const source = node.objects.bySeq(seqOpts)
   return new Promise((resolve, reject) => {
     source.on('error', reject)

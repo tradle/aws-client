@@ -6,10 +6,7 @@ module.exports = {
     "extends": "eslint:recommended",
     "parserOptions": {
         "sourceType": "module",
-        "ecmaVersion": 8,
-        "ecmaFeatures": {
-            "experimentalObjectRestSpread": true
-        }
+        "ecmaVersion": 9
     },
     "rules": {
         "accessor-pairs": "error",
@@ -131,7 +128,7 @@ module.exports = {
         "no-extend-native": "error",
         "no-extra-bind": "error",
         "no-extra-label": "error",
-        "no-extra-parens": "error",
+        "no-extra-parens": "warn",
         "no-floating-decimal": "error",
         "no-implicit-coercion": "warn",
         "no-implicit-globals": "error",
@@ -268,7 +265,7 @@ module.exports = {
         "valid-jsdoc": "warn",
         "vars-on-top": "error",
         "wrap-iife": "error",
-        "wrap-regex": "error",
+        "wrap-regex": "warn",
         "yield-star-spacing": "error",
         "yoda": [
             "error",
