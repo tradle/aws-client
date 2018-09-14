@@ -125,6 +125,8 @@ function Client ({
   this._name = node.name || (counterparty && counterparty.slice(0, 6))
   this.setMaxListeners(0)
 
+  // not very efficient to have so many listeners
+  // maybe just use a wild emitter and log all events
   ;[
     'authenticated',
     'subscribed',
@@ -173,12 +175,8 @@ proto._findPosition = async function () {
     this._getReceivePosition()
   ])
 
-  try {
-    const [sent, received] = await this._await(promisePosition)
-    this._setPosition({ sent, received })
-  } catch (err) {
-    this._debug('errored out while getting position', err)
-  }
+  const [sent, received] = await this._await(promisePosition)
+  this._setPosition({ sent, received })
 }
 
 /**
