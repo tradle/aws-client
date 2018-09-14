@@ -213,7 +213,9 @@ test('init, auth', loudAsync(async (t) => {
       protocol: 'wss'
     })
 
-    return new EventEmitter()
+    const fakeMqttClient = new EventEmitter()
+    fakeMqttClient.end = (force, cb) => process.nextTick(cb || force)
+    return fakeMqttClient
   })
 
   const stubTip = sinon.stub(utils, 'getTip').callsFake(async () => {
@@ -283,6 +285,7 @@ test('catch up with server position before sending', loudAsync(async (t) => {
 
   const fakeMqttClient = new EventEmitter()
   fakeMqttClient.end = (force, cb) => {
+    closed = true
     process.nextTick(cb || force)
   }
 
@@ -313,11 +316,6 @@ test('catch up with server position before sending', loudAsync(async (t) => {
     t.same(topics, `${iotParentTopic}/${clientId}/sub/+`)
     subscribed = true
     cb()
-  }
-
-  fakeMqttClient.end = function (force, cb) {
-    closed = true
-    ;(cb || force)()
   }
 
   const serverPos = {
@@ -658,6 +656,10 @@ test('upload', loudAsync(async (t) => {
   })
 
   const fakeMqttClient = new EventEmitter()
+  fakeMqttClient.end = (force, cb) => {
+    process.nextTick(cb || force)
+  }
+
   fakeMqttClient.subscribe = (topics, opts, cb) => {
     process.nextTick(cb)
   }
