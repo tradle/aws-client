@@ -122,7 +122,7 @@ function Client ({
   this._retryOnSend = retryOnSend
 
   this._isLocalServer = isLocalUrl(this._endpoint)
-  this._name = node.name || (counterparty && counterparty.slice(0, 6)) || ''
+  this._name = (counterparty && counterparty.slice(0, 6)) || ''
   this.setMaxListeners(0)
 
   // not very efficient to have so many listeners
