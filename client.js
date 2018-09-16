@@ -283,9 +283,10 @@ proto._setCatchUpTarget = function ({ sent, received }) {
 
 proto._watchCatchUp = async function () {
   let error
+
   const waitForCatchUp = async () => {
     let madeProgress
-    let result = await Promise.race([
+    const result = await Promise.race([
       wait(exports.CATCH_UP_TIMEOUT),
       this._awaitEvent('messages').then(
         () => madeProgress = true,
@@ -294,7 +295,9 @@ proto._watchCatchUp = async function () {
     ])
 
     // poke server
-    if (!madeProgress) await this._announcePosition()
+    if (!(error || madeProgress)) {
+      await this._announcePosition()
+    }
 
     return this._state.canSend || error
   }
