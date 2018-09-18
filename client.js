@@ -5,6 +5,7 @@ const crypto = require('crypto')
 const util = require('util')
 const extend = require('lodash/extend')
 const once = require('lodash/once')
+const clone = require('lodash/clone')
 const cloneDeep = require('lodash/cloneDeep')
 const awsIot = require('aws-iot-device-sdk')
 const bindAll = require('bindall')
@@ -15,6 +16,7 @@ const Errors = require('@tradle/errors')
 const utils = require('./utils')
 const createState = require('./connection-state')
 const CustomErrors = require('./errors')
+const defaults = require('./defaults')
 const {
   Promise,
   RESOLVED,
@@ -66,11 +68,6 @@ const paths = {
 }
 
 exports = module.exports = Client
-exports.AUTH_TIMEOUT = 5000
-exports.CLOSE_TIMEOUT = 1000
-exports.SEND_TIMEOUT = 6000
-exports.CATCH_UP_TIMEOUT = 5000
-exports.CONNECT_TIMEOUT = 5000
 
 const DEFAULT_ENCODING = 'utf8'
 // const TOPIC_PREFIX = 'tradle-'
@@ -95,6 +92,7 @@ function Client ({
   retryOnSend=true,
   maxRequestConcurrency=10,
   autostart=true,
+  timeouts={},
 }) {
   EventEmitter.call(this)
   bindAll(this)
@@ -123,6 +121,7 @@ function Client ({
 
   this._isLocalServer = isLocalUrl(this._endpoint)
   this._name = (counterparty && counterparty.slice(0, 6)) || ''
+  this._timeouts = extend({ ...defaults.timeouts, ...timeouts })
   this.setMaxListeners(0)
 
   // not very efficient to have so many listeners
@@ -287,7 +286,7 @@ proto._watchCatchUp = async function () {
   const waitForCatchUp = async () => {
     let madeProgress
     const result = await Promise.race([
-      wait(exports.CATCH_UP_TIMEOUT),
+      wait(this._timeouts.catchUp),
       this._awaitEvent('messages').then(
         () => madeProgress = true,
         err => error = err
@@ -315,7 +314,7 @@ proto._authStep1 = async function () {
       clientId: this._clientId,
       identity: this._node.identity,
     },
-    timeout: exports.AUTH_TIMEOUT,
+    timeout: this._timeouts.auth1,
   }))
 
   if (!this._step1Result.challenge) {
@@ -369,7 +368,7 @@ proto._authStep2 = async function () {
   this._step2Result = await utils.post({
     url: `${this._endpoint}/${paths.auth}`,
     body: signed.object,
-    timeout: exports.AUTH_TIMEOUT,
+    timeout: this._timeouts.auth2,
   })
 
   this._setCatchUpTarget(this._step2Result.position)
@@ -506,8 +505,8 @@ proto._reset = async function () {
     try {
       await this._await(statePromise, {
         timeoutOpts: {
-          createError: () => new CustomErrors.ConnectTimeout(`after ${exports.CONNECT_TIMEOUT}ms`),
-          delay: exports.CONNECT_TIMEOUT
+          createError: () => new CustomErrors.ConnectTimeout(`after ${this._timeouts.connect}ms`),
+          delay: this._timeouts.connect
         }
       })
     } catch (err) {
@@ -537,7 +536,7 @@ proto._closeAwsClient = async function () {
   this._debug('closing wrapped aws iot client')
   await closeAwsIotClient({
     client,
-    timeout: exports.CLOSE_TIMEOUT,
+    timeout: this._timeouts.close,
     force: true,
     log: this._debug,
   })
@@ -821,7 +820,7 @@ proto.start = async function () {
       event: 'authenticated',
       fn: () => this._await(this._auth(), {
         timeoutOpts: {
-          delay: exports.AUTH_TIMEOUT,
+          delay: this._timeouts.auth,
           createError: () => new CustomErrors.Timeout('auth timed out'),
         }
       })
@@ -831,7 +830,7 @@ proto.start = async function () {
       event: 'ready',
       fn: () => this._await(this._state.await({ canSend: true }), {
         timeoutOpts: {
-          delay: exports.CATCH_UP_TIMEOUT,
+          delay: this._timeouts.catchUp,
           createError: () => {
             return new CustomErrors.Timeout('catch-up timed out')
           }
@@ -886,10 +885,14 @@ proto.now = function () {
   return Date.now() + this._serverAheadMillis
 }
 
-proto.send = async function ({ message, link, timeout=exports.SEND_TIMEOUT }) {
+proto.send = async function ({ message, link, timeout }) {
   let attemptsLeft = getAttemptsLeft(this._retryOnSend)
   let err
   let iterationStart
+
+  if (!timeout) {
+    timeout = this._timeouts.send
+  }
 
   while (attemptsLeft-- > 0 && timeout > 0) {
     let state = this._state

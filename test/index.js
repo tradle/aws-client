@@ -366,8 +366,7 @@ test('catch up with server position before sending', loudAsync(async (t) => {
   // should wait till it's caught up to server position
   client.on('ready', t.fail)
 
-  const { CATCH_UP_TIMEOUT } = Client
-  Client.CATCH_UP_TIMEOUT = 500
+  client._timeouts.catchUp = 500
 
   let sentAnnounce
   const publishStub = sinon.stub(client, 'publish').callsFake(async ({ topic, payload }) => {
@@ -392,8 +391,6 @@ test('catch up with server position before sending', loudAsync(async (t) => {
   await wait(100)
   t.equal(publishStub.callCount, 1)
   publishStub.restore()
-
-  Client.CATCH_UP_TIMEOUT = CATCH_UP_TIMEOUT
 
   fakeMqttClient.handleMessage({
     topic: `${iotParentTopic}/${clientId}/sub/inbox`,

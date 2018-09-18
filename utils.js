@@ -211,6 +211,11 @@ const assert = (statement, errMsg) => {
 
 const createTimeoutError = delay => new CustomErrors.Timeout(`timed out after ${delay}`)
 const delayThrow = ({ delay, createError=createTimeoutError }) => {
+  assert(typeof delay === 'number', 'expected number "delay"')
+  if (createError) {
+    assert(typeof createError === 'function', 'expected function "createError"')
+  }
+
   let cancel
   const promise = new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
