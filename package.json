@@ -20,7 +20,7 @@
   "scripts": {
     "test": "BLUEBIRD_DEBUG=1 NODE_ENV=test DEBUG=*tradle* node test",
     "lint": "eslint --quiet --ignore-path .gitignore --ignore-path .git/info/exclude .",
-    "prepush": "npm test"
+    "precommit": "npm run lint && npm test"
   },
   "dependencies": {
     "@tradle/constants": "^2.1.0",
