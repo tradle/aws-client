@@ -1,3 +1,5 @@
+/* eslint-disable no-console */
+
 const zlib = require('zlib')
 const { EventEmitter } = require('events')
 const _ = require('lodash')

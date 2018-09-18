@@ -13,10 +13,7 @@ module.exports = {
         "array-bracket-spacing": "error",
         "array-callback-return": "error",
         "arrow-body-style": "warn",
-        "arrow-parens": [
-            "error",
-            "as-needed"
-        ],
+        "arrow-parens": "off",
         "arrow-spacing": [
             "error",
             {

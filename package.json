@@ -19,7 +19,7 @@
   },
   "scripts": {
     "test": "BLUEBIRD_DEBUG=1 NODE_ENV=test DEBUG=*tradle* node test",
-    "lint": "eslint --quiet --ignore-path .gitignore .",
+    "lint": "eslint --quiet --ignore-path .gitignore --ignore-path .git/info/exclude .",
     "prepush": "npm test"
   },
   "dependencies": {

@@ -1,3 +1,5 @@
-const obj = typeof global !== 'undefined' ? global : self
+/* global self */
+
+const obj = typeof global === 'undefined' ? self : global
 
 module.exports = obj.fetch.bind(obj)
