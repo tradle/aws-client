@@ -185,7 +185,8 @@ const uploadToS3 = async ({
   }
 
   request.headers = signer.sign(request)
-  return await utils.fetch(request.url, request)
+  const res = await utils.fetch(request.url, request)
+  return await processResponse(res)
 }
 
 const download = async ({ url }) => {
