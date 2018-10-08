@@ -912,6 +912,8 @@ proto.send = async function ({ message, link, timeout }) {
       Errors.rethrow(e, 'developer')
       timeout -= (Date.now() - iterationStart)
       err = e
+    } finally {
+      this._sending = null
     }
   }
 
