@@ -569,6 +569,11 @@ proto._subscribe = async function () {
     return
   }
 
+  if (this._state.subscribed) {
+    this._debug('leaving it to MQTT client to auto-resubscribe')
+    return
+  }
+
   const topic = this._prefixTopic(`${this._clientId}/sub/+`)
   this._debug(`subscribing to topic: ${topic}`)
   try {
