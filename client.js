@@ -333,7 +333,7 @@ proto._authStep1 = async function () {
 }
 
 proto._postProcessAuthResponse = function (obj) {
-  const { accessKey, secretKey, sessionToken, uploadPrefix } = obj
+  const { accessKey, secretKey, sessionToken, uploadPrefix, iotEndpoint } = obj
   if (accessKey) {
     this._credentials = {
       accessKeyId: accessKey,
@@ -348,6 +348,56 @@ proto._postProcessAuthResponse = function (obj) {
       this._uploadConfig = parsePrefix(this._uploadPrefix)
     }
   }
+
+  if (iotEndpoint) {
+    this._iotEndpoint = iotEndpoint
+  }
+
+  if (this._iotEndpoint && this._credentials) {
+    this._initClient()
+  }
+}
+
+proto._initClient = function () {
+  this._debug('initializing mqtt client')
+  const iotEndpoint = this._iotEndpoint
+  const [host, port] = iotEndpoint.split(':')
+  const client = awsIot.device({
+    region: this._region,
+    protocol: isLocalHost(iotEndpoint) ? 'ws' : 'wss',
+    accessKeyId: this._credentials.accessKeyId,
+    secretKey: this._credentials.secretAccessKey,
+    sessionToken: this._credentials.sessionToken,
+    port: port ? Number(port) : 443,
+    host: host,
+    clientId: this._clientId,
+    encoding: this._encoding
+  })
+
+  this._client = promisify(client)
+  // ignore, handle in this._clientEvents
+  this._client.on('error', () => {})
+
+  // override to do a manual PUBACK
+  client.handleMessage = this._handleMessage
+
+  this._clientEvents = new Ultron(client)
+  this._clientEvents.on('connect', this._onconnect)
+  // this._clientEvents.on('packetreceive', (...args) => {
+  //   this._debug('PACKETRECEIVE', ...args)
+  // })
+
+  // this._clientEvents.on('packetsend', (...args) => {
+  //   this._debug('PACKETSEND', ...args)
+  // })
+
+  this._clientEvents.on('connect', this._subscribe)
+
+  // this.listenTo(client, 'message', this._onmessage)
+  this._clientEvents.on('reconnect', this._onreconnect)
+  this._clientEvents.on('offline', this._onoffline)
+  this._clientEvents.on('close', this._onclose)
+  this._clientEvents.on('error', this._fail)
 }
 
 proto._authStep2 = async function () {
@@ -416,51 +466,6 @@ proto._auth = async function () {
   })
 
   await this._authStep2()
-
-  // this._authenticated = true
-
-  if (!iotEndpoint) {
-    return
-  }
-
-  this._debug('initializing mqtt client')
-  const [host, port] = iotEndpoint.split(':')
-  const client = awsIot.device({
-    region,
-    protocol: isLocalHost(iotEndpoint) ? 'ws' : 'wss',
-    accessKeyId: this._credentials.accessKeyId,
-    secretKey: this._credentials.secretAccessKey,
-    sessionToken: this._credentials.sessionToken,
-    port: port ? Number(port) : 443,
-    host: host,
-    clientId: this._clientId,
-    encoding: this._encoding
-  })
-
-  this._client = promisify(client)
-  // ignore, handle in this._clientEvents
-  this._client.on('error', () => {})
-
-  // override to do a manual PUBACK
-  client.handleMessage = this._handleMessage
-
-  this._clientEvents = new Ultron(client)
-  this._clientEvents.on('connect', this._onconnect)
-  // this._clientEvents.on('packetreceive', (...args) => {
-  //   this._debug('PACKETRECEIVE', ...args)
-  // })
-
-  // this._clientEvents.on('packetsend', (...args) => {
-  //   this._debug('PACKETSEND', ...args)
-  // })
-
-  this._clientEvents.on('connect', this._subscribe)
-
-  // this.listenTo(client, 'message', this._onmessage)
-  this._clientEvents.on('reconnect', this._onreconnect)
-  this._clientEvents.on('offline', this._onoffline)
-  this._clientEvents.on('close', this._onclose)
-  this._clientEvents.on('error', this._fail)
 }
 
 proto._awaitEvent = async function (event) {
