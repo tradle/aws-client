@@ -479,6 +479,7 @@ proto._reset = async function () {
   this._serverAheadMillis = 0
   this._sending = null
   this._position = null
+  this._credentials = null
   if (this._errorPromise && !this._errorPromise.isRejected()) {
     throw new CustomErrors.IllegalInvocation('_reset() can only be called after a failure')
   }
