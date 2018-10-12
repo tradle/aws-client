@@ -333,7 +333,19 @@ proto._authStep1 = async function () {
 }
 
 proto._postProcessAuthResponse = function (obj) {
-  const { accessKey, secretKey, sessionToken, uploadPrefix, iotEndpoint } = obj
+  const {
+    accessKey,
+    secretKey,
+    sessionToken,
+    uploadPrefix,
+    iotParentTopic,
+    iotEndpoint,
+    s3Endpoint,
+    region,
+    // timestamp of request hitting server
+    time,
+  } = obj
+
   if (accessKey) {
     this._credentials = {
       accessKeyId: accessKey,
@@ -349,8 +361,26 @@ proto._postProcessAuthResponse = function (obj) {
     }
   }
 
+  if (iotParentTopic) {
+    this._parentTopic = iotParentTopic
+  }
+
   if (iotEndpoint) {
     this._iotEndpoint = iotEndpoint
+  }
+
+  if (s3Endpoint) {
+    this._s3Endpoint = s3Endpoint
+  }
+
+  if (region) {
+    this._region = region
+  }
+
+  if (time) {
+    this._adjustServerTime({
+      serverEnd: time
+    })
   }
 
   if (this._iotEndpoint && this._credentials) {
@@ -436,34 +466,12 @@ proto._auth = async function () {
   if (!this._clientId) this._clientId = genClientId(permalink)
 
   const clientId = this._clientId
-  this._debug('clientId', clientId)
+  this._debug('fetching temporary credentials for clientId', clientId)
 
-  this._debug('fetching temporary credentials')
-
-  const {
-    s3Endpoint,
-    iotEndpoint,
-    iotParentTopic,
-    region,
-    challenge,
-    // timestamp of request hitting server
-    time
-  } = await this._authStep1()
-
-  this._s3Endpoint = s3Endpoint
-  if (!iotEndpoint) {
+  await this._authStep1()
+  if (!this._iotEndpoint) {
     this._debug('no "iotEndpoint" returned, will use http only')
   }
-
-  if (iotParentTopic) {
-    this._parentTopic = iotParentTopic
-  }
-
-  this._region = region
-
-  this._adjustServerTime({
-    serverEnd: time
-  })
 
   await this._authStep2()
 }
