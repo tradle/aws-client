@@ -17,6 +17,7 @@ const utils = require('./utils')
 const createState = require('./connection-state')
 const CustomErrors = require('./errors')
 const defaults = require('./defaults')
+const createEmbedsClient = require('./embeds').createClient
 const {
   Promise,
   RESOLVED,
@@ -27,11 +28,8 @@ const {
   stringify,
   prettify,
   isPromise,
-  replaceDataUrls,
-  parsePrefix,
-  resolveEmbeds,
+  parseUploadPrefix,
   serializeMessage,
-  extractAndUploadEmbeds,
   wait,
   delayThrow,
   processResponse,
@@ -122,6 +120,7 @@ function Client ({
   this._isLocalServer = isLocalUrl(this._endpoint)
   this._name = (counterparty && counterparty.slice(0, 6)) || ''
   this._timeouts = extend({ ...defaults.timeouts, ...timeouts })
+  this._embeds = createEmbedsClient()
   this.setMaxListeners(0)
 
   // not very efficient to have so many listeners
@@ -357,7 +356,7 @@ proto._postProcessAuthResponse = function (obj) {
   if (uploadPrefix) {
     this._uploadPrefix = uploadPrefix.replace(/^s3:\/\//, '')
     if (!/^https?:\/\//.test(this._uploadPrefix)) {
-      this._uploadConfig = parsePrefix(this._uploadPrefix)
+      this._uploadConfig = parseUploadPrefix(this._uploadPrefix)
     }
   }
 
@@ -699,7 +698,7 @@ proto._processMessage = async function (message) {
     }
   }
 
-  await resolveEmbeds(message, this._maxRequestConcurrency)
+  await this._embeds.resolve(message, this._maxRequestConcurrency)
   const maybePromise = this.onmessage(message)
   if (isPromise(maybePromise)) await maybePromise
 
@@ -769,7 +768,7 @@ proto._replaceDataUrls = async function (message) {
     ? cloneDeep(message.unserialized.object)
     : cloneDeep(message)
 
-  const changed = await extractAndUploadEmbeds(extend({
+  const changed = await this._embeds.extractAndUpload(extend({
     object: copy,
     region: this._region,
     endpoint: this._s3Endpoint,

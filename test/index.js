@@ -12,13 +12,12 @@ const { TYPE, SIG } = require('@tradle/constants')
 const { PREFIX } = require('@tradle/embed')
 const IotMessage = require('@tradle/iot-message')
 const utils = require('../utils')
+const Embeds = require('../embeds')
 const {
   Promise,
   post,
   genClientId,
-  replaceDataUrls,
-  uploadToS3,
-  parsePrefix,
+  parseUploadPrefix,
   decodeDataURI
 } = utils
 
@@ -109,6 +108,7 @@ test('fetch with timeout', loudAsync(async (t) => {
 }))
 
 test('resolve embeds', loudAsync(async (t) => {
+  const embedsClient = Embeds.createClient()
   const s3Url = 'https://mybucket.s3.amazonaws.com/mykey'
   const object = {
     blah: {
@@ -131,11 +131,11 @@ test('resolve embeds', loudAsync(async (t) => {
             }
           }
         },
-        arrayBuffer: () => Promise.resolve(toArrayBuffer(decodeDataURI(dataUri)))
+        arrayBuffer: () => Promise.resolve(toArrayBuffer(Embeds.decodeDataURI(dataUri)))
       })
     })
 
-  await utils.resolveEmbeds(object)
+  await embedsClient.resolve(object)
   t.same(object, {
     blah: {
       habla: dataUri
@@ -172,11 +172,11 @@ test.skip('upload to s3', loudAsync(async (t) => {
 
   // console.log(JSON.stringify(credentials, null, 2))
 
-  const dataUrls = replaceDataUrls(_.extend({
+  const dataUrls = Embeds.replaceDataUrls(_.extend({
     object: {
       blah: 'data:image/jpeg;base64,/8j/4AAQSkZJRgABAQAAAQABAAD'
     }
-  }, parsePrefix(uploadPrefix)))
+  }, parseUploadPrefix(uploadPrefix)))
 
   console.log(JSON.stringify(_.extend({
     bucket: dataUrls[0].bucket,
@@ -184,7 +184,7 @@ test.skip('upload to s3', loudAsync(async (t) => {
     body: dataUrls[0].body.toString('base64')
   }, credentials), null, 2))
 
-  await uploadToS3(_.extend(dataUrls[0], { credentials }))
+  await Embeds.uploadToS3(_.extend(dataUrls[0], { credentials }))
   t.end()
 }))
 

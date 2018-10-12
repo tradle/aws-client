@@ -27,6 +27,7 @@
     "@tradle/embed": "^1.1.2",
     "@tradle/errors": "^1.1.1",
     "@tradle/iot-message": "^3.0.0",
+    "@tradle/promise-utils": "^1.2.0",
     "aws-iot-device-sdk": "mvayngrib/aws-iot-device-sdk-js",
     "aws-sign-web": "github:mvayngrib/aws-sign-web",
     "bindall": "^2.0.1",

@@ -8,14 +8,8 @@ const fetch = require('isomorphic-fetch')
 const Errors = require('@tradle/errors')
 const stringify = JSON.stringify.bind(JSON)
 const promisify = require('pify')
-const { AwsSigner } = require('aws-sign-web')
 const { serializeMessage } = require('@tradle/engine').utils
-const {
-  replaceDataUrls,
-  resolveEmbeds,
-  decodeDataURI,
-  encodeDataURI
-} = require('@tradle/embed')
+const { isPromise } = require('@tradle/promise-utils')
 
 const CustomErrors = require('./errors')
 const fetchImpl = require('./fetch')
@@ -102,10 +96,6 @@ function prettify (obj) {
   return stringify(obj, null, 2)
 }
 
-function isPromise (obj) {
-  return obj && typeof obj.then === 'function'
-}
-
 function getTip ({ node, counterparty, sent }) {
   const from = sent ? node.permalink : counterparty
   const to = sent ? counterparty : node.permalink
@@ -127,7 +117,7 @@ function getTip ({ node, counterparty, sent }) {
   })
 }
 
-function parsePrefix (prefix) {
+function parseUploadPrefix (prefix) {
   prefix = prefix.replace(/^(?:https?|s3):\/\//, '')
   const idx = prefix.indexOf('/')
   const bucket = prefix.slice(0, idx)
@@ -135,75 +125,8 @@ function parsePrefix (prefix) {
   return { bucket, keyPrefix }
 }
 
-const extractAndUploadEmbeds = async (opts) => {
-  const { object, region, credentials } = opts
-  const replacements = replaceDataUrls(opts)
-  if (replacements.length) {
-    await Promise.all(replacements.map(replacement => {
-      replacement.region = region
-      replacement.credentials = credentials
-      return uploadToS3(replacement)
-    }))
-
-    return true
-  }
-}
-
 function sha256 (strOrBuffer) {
   return crypto.createHash('sha256').update(strOrBuffer).digest('hex')
-}
-
-const uploadToS3 = async ({
-  region='us-east-1',
-  credentials,
-  bucket,
-  key,
-  body,
-  mimetype,
-  host,
-  s3Url
-}) => {
-  const signer = new AwsSigner(extend({
-    service: 's3',
-    region,
-  }, credentials))
-
-  const request = {
-    method: 'PUT',
-    url: s3Url,
-    headers: {
-      "Content-Type": mimetype,
-      "Content-Length": body.length,
-      "Host": host,
-      "x-amz-content-sha256": 'UNSIGNED-PAYLOAD',
-    },
-    body
-  }
-
-  if (credentials.sessionToken) {
-    request.headers['x-amz-security-token'] = credentials.sessionToken
-  }
-
-  request.headers = signer.sign(request)
-  const res = await utils.fetch(request.url, request)
-  return await processResponse(res)
-}
-
-const download = async ({ url }) => {
-  const res = await utils.fetch(url)
-  if (!res.ok || res.status > 300) {
-    const text = await res.text()
-    throw new Error(text)
-  }
-
-  const arrayBuffer = await res.arrayBuffer()
-  const buf = new Buffer(arrayBuffer)
-  buf.mimetype = res.headers.get('content-type')
-  return buf
-}
-
-const resolveS3Urls = (object, concurrency=10) => {
-  return resolveEmbeds({ object, resolve: download, concurrency })
 }
 
 const assert = (statement, errMsg) => {
@@ -303,13 +226,6 @@ const closeAwsIotClient = async ({ client, timeout, force, log=debug }) => {
   }
 }
 
-const series = async (fns) => {
-  for (const fn of fns) {
-    const result = fn()
-    if (isPromise(result)) await result
-  }
-}
-
 const utils = module.exports = {
   Promise,
   RESOLVED,
@@ -318,20 +234,13 @@ const utils = module.exports = {
   genClientId,
   genNonce,
   prettify,
-  isPromise,
   stringify,
   getTip,
-  replaceDataUrls,
-  resolveEmbeds: resolveS3Urls,
   sha256,
   serializeMessage,
-  uploadToS3,
-  extractAndUploadEmbeds,
-  parsePrefix,
+  parseUploadPrefix,
   _fetch: fetchImpl,
   fetch: wrappedFetch,
-  encodeDataURI,
-  decodeDataURI,
   assert,
   wait,
   delayThrow,
@@ -340,5 +249,6 @@ const utils = module.exports = {
   isLocalHost,
   isLocalUrl,
   closeAwsIotClient,
-  series,
+  isPromise,
+  processResponse,
 }
