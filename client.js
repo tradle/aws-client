@@ -30,7 +30,6 @@ const {
   replaceDataUrls,
   parsePrefix,
   resolveEmbeds,
-  serializeMessage,
   extractAndUploadEmbeds,
   wait,
   delayThrow,
@@ -765,12 +764,9 @@ proto._announcePosition = async function () {
 // }
 
 proto._replaceDataUrls = async function (message) {
-  const copy = Buffer.isBuffer(message)
-    ? cloneDeep(message.unserialized.object)
-    : cloneDeep(message)
-
+  message = cloneDeep(message)
   const changed = await extractAndUploadEmbeds(extend({
-    object: copy,
+    object: message,
     region: this._region,
     endpoint: this._s3Endpoint,
     credentials: this._credentials,
@@ -778,12 +774,7 @@ proto._replaceDataUrls = async function (message) {
 
   if (!changed) return message
 
-  const serialized = utils.serializeMessage(copy)
-  serialized.unserialized = extend({}, message.unserialized || {}, {
-    object: copy
-  })
-
-  return serialized
+  return message
 }
 
 // PUBLIC API START
@@ -905,6 +896,11 @@ proto.now = function () {
 }
 
 proto.send = async function ({ message, link, timeout }) {
+  // backwards compat
+  if (message.unserialized) {
+    message = message.unserialized.object
+  }
+
   let attemptsLeft = getAttemptsLeft(this._retryOnSend)
   let err
   let iterationStart
@@ -956,7 +952,7 @@ proto._send = async function ({ message, link, timeout }) {
     }
   }
 
-  const length = message.length
+  const { length } = message
   let useHttp
   if (this._httpOnly) {
     this._debug('sending over http: in http-only mode')
@@ -973,7 +969,7 @@ proto._send = async function ({ message, link, timeout }) {
   this._sending = link
   try {
     return await send({
-      message: message.unserialized.object,
+      message,
       link,
       timeoutOpts: {
         createError: () => new CustomErrors.SendTimeout(`after ${timeout}ms`),
