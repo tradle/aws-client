@@ -149,19 +149,14 @@ const extractAndUploadEmbeds = async (opts) => {
   }
 }
 
-function sha256 (strOrBuffer) {
-  return crypto.createHash('sha256').update(strOrBuffer).digest('hex')
-}
-
-const uploadToS3 = async ({
+const genSkeletonRequestForS3Put = ({
   region='us-east-1',
   credentials,
   bucket,
   key,
-  body,
   mimetype,
   host,
-  s3Url
+  s3Url,
 }) => {
   const signer = new AwsSigner(extend({
     service: 's3',
@@ -173,18 +168,27 @@ const uploadToS3 = async ({
     url: s3Url,
     headers: {
       "Content-Type": mimetype,
-      "Content-Length": body.length,
       "Host": host,
       "x-amz-content-sha256": 'UNSIGNED-PAYLOAD',
     },
-    body
+    // a dummy body, this is NOT signed
+    // see UNSIGNED-PAYLOAD in header above
+    body: new Buffer(0),
   }
 
+  delete request.body
   if (credentials.sessionToken) {
     request.headers['x-amz-security-token'] = credentials.sessionToken
   }
 
   request.headers = signer.sign(request)
+  return request
+}
+
+// genSkeletonRequestForS3Put opts, plus "body"
+const uploadToS3 = async opts => {
+  const request = genSkeletonRequestForS3Put(opts)
+  request.body = opts.body
   const res = await utils.fetch(request.url, request)
   return await processResponse(res)
 }
@@ -323,8 +327,8 @@ const utils = module.exports = {
   getTip,
   replaceDataUrls,
   resolveEmbeds: resolveS3Urls,
-  sha256,
   serializeMessage,
+  genSkeletonRequestForS3Put,
   uploadToS3,
   extractAndUploadEmbeds,
   parsePrefix,
