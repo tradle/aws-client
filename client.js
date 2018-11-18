@@ -31,6 +31,7 @@ const {
   parsePrefix,
   resolveEmbeds,
   extractAndUploadEmbeds,
+  genS3PutRequestSkeleton,
   wait,
   delayThrow,
   processResponse,
@@ -893,6 +894,33 @@ proto.stop = async function (force) {
 
 proto.now = function () {
   return Date.now() + this._serverAheadMillis
+}
+
+proto.awaitAuthenticated = async function () {
+  await this._await(this._state.await({ authenticated: true }))
+}
+
+proto.getS3Target = function () {
+  return {
+    region: this._region,
+    endpoint: this._s3Endpoint,
+    ...this._uploadConfig,
+  }
+}
+
+proto.genUploadRequestSkeleton = function ({ key, mimetype }) {
+  if (!this._state.authenticated) {
+    throw new CustomErrors.IllegalInvocation(`wait till I'm authenticated! Hint: use client.awaitAuthenticated()`)
+  }
+
+  return genS3PutRequestSkeleton({
+    region: this._region,
+    endpoint: this._s3Endpoint,
+    credentials: this._credentials,
+    bucket: this._uploadConfig.bucket,
+    key: this._uploadConfig.keyPrefix + key,
+    mimetype,
+  })
 }
 
 proto.send = async function ({ message, link, timeout }) {

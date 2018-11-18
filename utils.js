@@ -14,7 +14,9 @@ const {
   replaceDataUrls,
   resolveEmbeds,
   decodeDataURI,
-  encodeDataURI
+  encodeDataURI,
+  getS3UploadTarget,
+  getS3Endpoint,
 } = require('@tradle/embed')
 
 const CustomErrors = require('./errors')
@@ -149,8 +151,9 @@ const extractAndUploadEmbeds = async (opts) => {
   }
 }
 
-const genSkeletonRequestForS3Put = ({
+const genS3PutRequestSkeleton = ({
   region='us-east-1',
+  endpoint,
   credentials,
   bucket,
   key,
@@ -158,6 +161,18 @@ const genSkeletonRequestForS3Put = ({
   host,
   s3Url,
 }) => {
+  if (!s3Url) {
+    ({ s3Url, host } = getS3UploadTarget({
+      key,
+      bucket,
+      endpoint: endpoint || getS3Endpoint(region)
+    }))
+  }
+
+  if (!host) {
+    host = parseURL(s3Url).host
+  }
+
   const signer = new AwsSigner(extend({
     service: 's3',
     region,
@@ -185,9 +200,9 @@ const genSkeletonRequestForS3Put = ({
   return request
 }
 
-// genSkeletonRequestForS3Put opts, plus "body"
+// genS3PutRequestSkeleton opts, plus "body"
 const uploadToS3 = async opts => {
-  const request = genSkeletonRequestForS3Put(opts)
+  const request = genS3PutRequestSkeleton(opts)
   request.body = opts.body
   const res = await utils.fetch(request.url, request)
   return await processResponse(res)
@@ -328,7 +343,7 @@ const utils = module.exports = {
   replaceDataUrls,
   resolveEmbeds: resolveS3Urls,
   serializeMessage,
-  genSkeletonRequestForS3Put,
+  genS3PutRequestSkeleton,
   uploadToS3,
   extractAndUploadEmbeds,
   parsePrefix,
