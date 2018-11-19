@@ -908,7 +908,7 @@ proto.getS3Target = function () {
   }
 }
 
-proto.genUploadRequestSkeleton = function ({ key, mimetype }) {
+proto.genUploadRequestSkeleton = function ({ key, headers }) {
   if (!this._state.authenticated) {
     throw new CustomErrors.IllegalInvocation(`wait till I'm authenticated! Hint: use client.awaitAuthenticated()`)
   }
@@ -919,7 +919,7 @@ proto.genUploadRequestSkeleton = function ({ key, mimetype }) {
     credentials: this._credentials,
     bucket: this._uploadConfig.bucket,
     key: this._uploadConfig.keyPrefix + key,
-    mimetype,
+    headers,
   })
 }
 

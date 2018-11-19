@@ -157,9 +157,9 @@ const genS3PutRequestSkeleton = ({
   credentials,
   bucket,
   key,
-  mimetype,
   host,
   s3Url,
+  headers={},
 }) => {
   if (!s3Url) {
     ({ s3Url, host } = getS3UploadTarget({
@@ -182,9 +182,9 @@ const genS3PutRequestSkeleton = ({
     method: 'PUT',
     url: s3Url,
     headers: {
-      "Content-Type": mimetype,
-      "Host": host,
-      "x-amz-content-sha256": 'UNSIGNED-PAYLOAD',
+      ...headers,
+      Host: host,
+      'x-amz-content-sha256': 'UNSIGNED-PAYLOAD',
     },
     // a dummy body, this is NOT signed
     // see UNSIGNED-PAYLOAD in header above
@@ -202,8 +202,15 @@ const genS3PutRequestSkeleton = ({
 
 // genS3PutRequestSkeleton opts, plus "body"
 const uploadToS3 = async opts => {
-  const request = genS3PutRequestSkeleton(opts)
+  const { headers={} } = opts
+  headers['Content-Type'] = opts.mimetype || opts.mimeType
+  if (opts.body) {
+    headers['Content-Length'] = opts.body.length
+  }
+
+  const request = genS3PutRequestSkeleton({ ...opts, headers })
   request.body = opts.body
+
   const res = await utils.fetch(request.url, request)
   return await processResponse(res)
 }
