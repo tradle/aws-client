@@ -735,6 +735,33 @@ test('upload', loudAsync(async (t) => {
   stubTip.restore()
 }))
 
+test('use consistent local ip', async t => {
+  const badIotEndpoint = 'http://192.168.1.179:1884/mqtt?blah'
+  const goodIotEndpoint = 'http://127.0.0.1:1884/mqtt?blah'
+
+  const badS3Endpoint = 'http://192.168.1.179:4569/abracadabra'
+  const goodS3Endpoint = 'http://127.0.0.1:4569/abracadabra'
+
+  const client = new Client({
+    endpoint: 'http://127.0.0.1:21012',
+    iotEndpoint: badIotEndpoint,
+    clientId: 'abc',
+    node: fakeNode(),
+    getSendPosition: () => Promise.resolve(null),
+    getReceivePosition: () => Promise.resolve(null)
+  })
+
+  t.equal(client._iotEndpoint, goodIotEndpoint)
+
+  client._iotEndpoint = badIotEndpoint
+  client._s3Endpoint = badS3Endpoint
+  t.equal(client._iotEndpoint, goodIotEndpoint)
+  t.equal(client._s3Endpoint, goodS3Endpoint)
+
+  await client.stop()
+  t.end()
+})
+
 function fakeNode () {
   return {
     permalink: 'a'.repeat(32),

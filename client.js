@@ -106,7 +106,6 @@ function Client ({
     typeof node.permalink === 'string', 'expected "node" with function "sign" and string "permalink"')
 
   this._endpoint = trimTrailingSlashes(endpoint)
-  this._iotEndpoint = iotEndpoint ? trimTrailingSlashes(iotEndpoint) : undefined
   this._parentTopic = parentTopic
   this._client = null
   this._clientId = clientId
@@ -120,6 +119,14 @@ function Client ({
   this._retryOnSend = retryOnSend
 
   this._isLocalServer = isLocalUrl(this._endpoint)
+  if (this._isLocalServer) {
+    this._remapLocalIPBasedProps('_iotEndpoint', '_s3Endpoint')
+  }
+
+  if (iotEndpoint) {
+    this._iotEndpoint = trimTrailingSlashes(iotEndpoint)
+  }
+
   this._name = (counterparty && counterparty.slice(0, 6)) || ''
   this._timeouts = extend({ ...defaults.timeouts, ...timeouts })
   this.setMaxListeners(0)
@@ -167,6 +174,20 @@ function Client ({
 
 util.inherits(Client, EventEmitter)
 const proto = Client.prototype
+
+proto._remapLocalIPBasedProps = function (...props) {
+  const endpointIp = parseUrl(this._endpoint).hostname
+  props.forEach(prop => {
+    Object.defineProperty(this, prop, {
+      get: () => this[`_${prop}`],
+      set: value => {
+        const parsed = parseUrl(value)
+        this._debug('remapping prop', prop)
+        this[`_${prop}`] = value.replace(parsed.hostname, endpointIp)
+      }
+    })
+  })
+}
 
 proto._findPosition = async function () {
   const promisePosition = Promise.all([
