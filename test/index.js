@@ -736,11 +736,11 @@ test('upload', loudAsync(async (t) => {
 }))
 
 test('use consistent local ip', async t => {
-  const badIotEndpoint = 'http://192.168.1.179:1884/mqtt?blah'
-  const goodIotEndpoint = 'http://127.0.0.1:1884/mqtt?blah'
+  const badIotEndpoint = '192.168.1.179:1884'
+  const goodIotEndpoint = '127.0.0.1:1884'
 
-  const badS3Endpoint = 'http://192.168.1.179:4569/abracadabra'
-  const goodS3Endpoint = 'http://127.0.0.1:4569/abracadabra'
+  const badS3Endpoint = '192.168.1.179:4569'
+  const goodS3Endpoint = '127.0.0.1:4569'
 
   const client = new Client({
     endpoint: 'http://127.0.0.1:21012',
