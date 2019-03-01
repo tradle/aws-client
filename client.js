@@ -178,12 +178,15 @@ const proto = Client.prototype
 proto._remapLocalIPBasedProps = function (...props) {
   const endpointIp = parseUrl(this._endpoint).hostname
   props.forEach(prop => {
+    const privateProp = `_${prop}`
     Object.defineProperty(this, prop, {
-      get: () => this[`_${prop}`],
+      get: () => this[privateProp],
       set: value => {
-        const parsed = parseUrl(value)
-        this._debug('remapping prop', prop)
-        this[`_${prop}`] = value.replace(parsed.hostname, endpointIp)
+        // normalize to url
+        const host = value.split(':')[0]
+        const newValue = value.replace(host, endpointIp)
+        this[privateProp] = newValue
+        this._debug(`remapped ${prop} from ${value} -> ${newValue}`)
       }
     })
   })
